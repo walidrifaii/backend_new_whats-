@@ -29,23 +29,33 @@ const createWhatsAppClient = async (clientId) => {
 
   console.log(`Initializing WhatsApp client: ${clientId}`);
 
+  const chromeExecutablePath =
+    process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN;
+
+  const puppeteerConfig = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu'
+    ]
+  };
+
+  if (chromeExecutablePath) {
+    puppeteerConfig.executablePath = chromeExecutablePath;
+    console.log(`Using Chrome executable at: ${chromeExecutablePath}`);
+  }
+
   const wClient = new Client({
     authStrategy: new LocalAuth({
       clientId: clientId,
       dataPath: SESSIONS_DIR
     }),
-    puppeteer: {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu'
-      ]
-    }
+    puppeteer: puppeteerConfig
   });
 
   // QR Code event
