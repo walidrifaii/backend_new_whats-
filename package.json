@@ -7,7 +7,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "worker": "node src/workers/messageWorker.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "postinstall": "node ./node_modules/puppeteer/lib/cjs/puppeteer/node/cli.js browsers install chrome"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
