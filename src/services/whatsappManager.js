@@ -147,7 +147,22 @@ const createWhatsAppClient = async (clientId) => {
   );
 
   activeClients.set(clientId, wClient);
-  wClient.initialize();
+  wClient.initialize().catch(async (err) => {
+    console.error(`Failed to initialize WhatsApp client ${clientId}:`, err);
+    activeClients.delete(clientId);
+    try {
+      await WhatsAppClientModel.findOneAndUpdate(
+        { clientId },
+        { status: 'disconnected', qrCode: null }
+      );
+    } catch (dbErr) {
+      console.error(`Failed to persist init error state for ${clientId}:`, dbErr);
+    }
+    emitToClient(clientId, 'init_error', {
+      clientId,
+      message: err?.message || 'Initialization failed'
+    });
+  });
 
   return wClient;
 };

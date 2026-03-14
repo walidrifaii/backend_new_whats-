@@ -16,6 +16,14 @@ const logRoutes = require('./routes/logs');
 const { initWhatsAppManager } = require('./services/whatsappManager');
 const { setSocketIO } = require('./utils/socket');
 
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
