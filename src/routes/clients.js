@@ -6,6 +6,13 @@ const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 
+const withTimeout = (promise, ms, message) => {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+  ]);
+};
+
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
@@ -56,15 +63,31 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       return res.json({ message: 'Client already connected', client });
     }
 
-    // Ensure we restart with a clean auth state to avoid stale session linking issues.
-    await destroyClient(client.clientId);
-
-    // Start initialization in background
-    createWhatsAppClient(client.clientId, { forceReauth: true }).catch(err => {
-      console.error(`Init error for ${client.clientId}:`, err);
+    // Respond immediately to avoid request hanging in deployments.
+    await WhatsAppClientModel.findByIdAndUpdate(client._id, { status: 'initializing' });
+    res.json({
+      message: 'WhatsApp initialization started. Scan QR code when ready.',
+      clientId: client.clientId
     });
 
-    res.json({ message: 'WhatsApp initialization started. Scan QR code when ready.', clientId: client.clientId });
+    // Run teardown + initialization in background.
+    (async () => {
+      try {
+        await withTimeout(
+          destroyClient(client.clientId),
+          12000,
+          `Destroy client timeout for ${client.clientId}`
+        );
+      } catch (destroyErr) {
+        console.warn(`Destroy warning for ${client.clientId}:`, destroyErr.message);
+      }
+
+      try {
+        await createWhatsAppClient(client.clientId, { forceReauth: true });
+      } catch (err) {
+        console.error(`Init error for ${client.clientId}:`, err);
+      }
+    })();
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
