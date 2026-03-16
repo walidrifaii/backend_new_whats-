@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
@@ -9,9 +10,17 @@ const { emitToClient } = require('../utils/socket');
 // In-memory map of active WhatsApp client instances
 const activeClients = new Map();
 
+const getDefaultSessionsDir = () => {
+  // On cloud hosts, app directory may be ephemeral/restricted.
+  if (process.env.NODE_ENV === 'production') {
+    return path.join(os.tmpdir(), 'wwebjs-sessions');
+  }
+  return path.resolve(__dirname, '../../sessions');
+};
+
 const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)
-  : path.resolve(__dirname, '../../sessions');
+  : getDefaultSessionsDir();
 
 // Ensure sessions directory exists
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -109,11 +118,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     }),
     puppeteer: puppeteerConfig,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0,
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-    }
+    takeoverTimeoutMs: 0
   });
 
   // QR Code event
