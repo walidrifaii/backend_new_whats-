@@ -18,6 +18,28 @@ if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
+const resolveBundledChromePath = () => {
+  const chromeRoot = path.resolve(__dirname, '../../.puppeteer/chrome');
+  if (!fs.existsSync(chromeRoot)) return null;
+
+  const linuxBuilds = fs.readdirSync(chromeRoot)
+    .filter(name => name.startsWith('linux-'))
+    .sort();
+
+  if (!linuxBuilds.length) return null;
+
+  // Pick the newest downloaded build directory.
+  const latestLinuxBuild = linuxBuilds[linuxBuilds.length - 1];
+  const executablePath = path.join(
+    chromeRoot,
+    latestLinuxBuild,
+    'chrome-linux64',
+    'chrome'
+  );
+
+  return fs.existsSync(executablePath) ? executablePath : null;
+};
+
 const removePathIfExists = (targetPath) => {
   try {
     if (fs.existsSync(targetPath)) {
@@ -58,7 +80,9 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   }
 
   const chromeExecutablePath =
-    process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN;
+    process.env.PUPPETEER_EXECUTABLE_PATH ||
+    process.env.CHROME_BIN ||
+    resolveBundledChromePath();
 
   const puppeteerConfig = {
     headless: true,
