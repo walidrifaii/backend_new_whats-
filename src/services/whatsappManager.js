@@ -10,6 +10,16 @@ const { emitToClient } = require('../utils/socket');
 // In-memory map of active WhatsApp client instances
 const activeClients = new Map();
 
+const parseEnvInt = (key, fallback) => {
+  const value = parseInt(process.env[key] || `${fallback}`, 10);
+  return Number.isFinite(value) ? value : fallback;
+};
+
+const getInitTimeoutMs = () => parseEnvInt('WA_INIT_TIMEOUT_MS', 180000);
+const getInitMaxRetries = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 2));
+const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
+const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
+
 const getDefaultSessionsDir = () => {
   // On cloud hosts, app directory may be ephemeral/restricted.
   if (process.env.NODE_ENV === 'production') {
@@ -66,11 +76,47 @@ const clearClientSessionData = (clientId) => {
   removePathIfExists(path.join(SESSIONS_DIR, clientId));
 };
 
+const getRetryDelayMs = (attempt) => {
+  const baseDelay = getInitRetryBaseDelayMs();
+  const maxDelay = getInitRetryMaxDelayMs();
+  const delay = baseDelay * Math.pow(2, Math.max(0, attempt - 1));
+  return Math.min(delay, maxDelay);
+};
+
+const isRetryableInitError = (err) => {
+  const msg = (err?.message || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('target closed') ||
+    msg.includes('navigation') ||
+    msg.includes('browser') ||
+    msg.includes('websocket')
+  );
+};
+
+const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries }) => {
+  const attemptsTotal = maxRetries + 1;
+  const base =
+    timedOut
+      ? `WhatsApp initialization timed out for ${clientId}.`
+      : `WhatsApp initialization failed for ${clientId}.`;
+
+  const details = err?.message ? ` Reason: ${err.message}` : '';
+  const attemptText = ` Attempt ${attempt}/${attemptsTotal}.`;
+  const hint =
+    ' If running on Render free tier, warm-up/cold starts can delay QR. Check Chrome path and increase WA_INIT_TIMEOUT_MS.';
+
+  return `${base}${attemptText}${details}${hint}`;
+};
+
 /**
  * Creates and initializes a WhatsApp client for a given clientId
  */
 const createWhatsAppClient = async (clientId, options = {}) => {
-  const { forceReauth = false } = options;
+  const { forceReauth = false, attempt = 1 } = options;
+  const maxRetries = getInitMaxRetries();
 
   if (activeClients.has(clientId)) {
     console.log(`Client ${clientId} already active`);
@@ -79,7 +125,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
   console.log(`Initializing WhatsApp client: ${clientId}`);
 
-  if (forceReauth) {
+  if (forceReauth && attempt === 1) {
     console.log(`Clearing stale session data for ${clientId}`);
     clearClientSessionData(clientId);
     await WhatsAppClientModel.findOneAndUpdate(
@@ -121,30 +167,70 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     takeoverTimeoutMs: 0
   });
 
-  const initTimeoutMs = parseInt(process.env.WA_INIT_TIMEOUT_MS || '90000', 10);
+  const initTimeoutMs = getInitTimeoutMs();
   let initSettled = false;
   const settleInit = () => {
     initSettled = true;
     if (initTimeoutHandle) clearTimeout(initTimeoutHandle);
   };
 
-  // Prevent "initializing forever" when deployment cannot reach QR/ready.
-  const initTimeoutHandle = setTimeout(async () => {
+  const scheduleRetry = async ({ timedOut = false, err = null }) => {
     if (initSettled) return;
-    console.error(`Initialization timeout for ${clientId} after ${initTimeoutMs}ms`);
+    settleInit();
     activeClients.delete(clientId);
+
     try {
       await wClient.destroy();
     } catch (_) {}
+
+    const canRetry = attempt <= maxRetries && (timedOut || isRetryableInitError(err));
+
+    if (canRetry) {
+      const retryDelayMs = getRetryDelayMs(attempt);
+      const retryAttempt = attempt + 1;
+      console.warn(
+        `Retrying WhatsApp init for ${clientId} in ${retryDelayMs}ms ` +
+        `(attempt ${retryAttempt}/${maxRetries + 1})`
+      );
+
+      await WhatsAppClientModel.findOneAndUpdate(
+        { clientId },
+        { status: 'initializing', qrCode: null }
+      );
+
+      emitToClient(clientId, 'init_retry', {
+        clientId,
+        attempt: retryAttempt,
+        maxAttempts: maxRetries + 1,
+        retryInMs: retryDelayMs,
+        reason: timedOut ? 'timeout' : (err?.message || 'retryable-init-error')
+      });
+
+      setTimeout(() => {
+        createWhatsAppClient(clientId, { forceReauth: false, attempt: retryAttempt }).catch((retryErr) => {
+          console.error(`Retry bootstrap failed for ${clientId}:`, retryErr);
+        });
+      }, retryDelayMs);
+
+      return;
+    }
 
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'disconnected', qrCode: null }
     );
+
     emitToClient(clientId, 'init_error', {
       clientId,
-      message: 'Initialization timed out. Please reconnect and check server Chrome/runtime.'
+      message: buildInitErrorMessage({ clientId, err, timedOut, attempt, maxRetries })
     });
+  };
+
+  // Prevent "initializing forever" when deployment cannot reach QR/ready.
+  const initTimeoutHandle = setTimeout(async () => {
+    if (initSettled) return;
+    console.error(`Initialization timeout for ${clientId} after ${initTimeoutMs}ms`);
+    await scheduleRetry({ timedOut: true });
   }, initTimeoutMs);
 
   // QR Code event
@@ -242,20 +328,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
     console.error(`Failed to initialize WhatsApp client ${clientId}:`, err);
-    settleInit();
-    activeClients.delete(clientId);
-    try {
-      await WhatsAppClientModel.findOneAndUpdate(
-        { clientId },
-        { status: 'disconnected', qrCode: null }
-      );
-    } catch (dbErr) {
-      console.error(`Failed to persist init error state for ${clientId}:`, dbErr);
-    }
-    emitToClient(clientId, 'init_error', {
-      clientId,
-      message: err?.message || 'Initialization failed'
-    });
+    await scheduleRetry({ err });
   });
 
   return wClient;
