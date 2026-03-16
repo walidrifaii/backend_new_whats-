@@ -52,12 +52,15 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    if (isClientConnected(client.clientId)) {
-      return res.json({ message: 'Client already connecting or connected', client });
+    if (client.status === 'connected' && isClientConnected(client.clientId)) {
+      return res.json({ message: 'Client already connected', client });
     }
 
+    // Ensure we restart with a clean auth state to avoid stale session linking issues.
+    await destroyClient(client.clientId);
+
     // Start initialization in background
-    createWhatsAppClient(client.clientId).catch(err => {
+    createWhatsAppClient(client.clientId, { forceReauth: true }).catch(err => {
       console.error(`Init error for ${client.clientId}:`, err);
     });
 

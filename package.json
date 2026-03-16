@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "dev": "nodemon --ignore sessions --ignore uploads src/server.js",
     "worker": "node src/workers/messageWorker.js",
     "postinstall": "node ./node_modules/puppeteer/lib/cjs/puppeteer/node/cli.js browsers install chrome"
   },

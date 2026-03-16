@@ -18,16 +18,44 @@ if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
+const removePathIfExists = (targetPath) => {
+  try {
+    if (fs.existsSync(targetPath)) {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.error(`Failed removing path ${targetPath}:`, err.message);
+  }
+};
+
+const clearClientSessionData = (clientId) => {
+  // whatsapp-web.js LocalAuth usually stores session as "session-<clientId>".
+  removePathIfExists(path.join(SESSIONS_DIR, `session-${clientId}`));
+  // Keep compatibility with older/custom layouts.
+  removePathIfExists(path.join(SESSIONS_DIR, clientId));
+};
+
 /**
  * Creates and initializes a WhatsApp client for a given clientId
  */
-const createWhatsAppClient = async (clientId) => {
+const createWhatsAppClient = async (clientId, options = {}) => {
+  const { forceReauth = false } = options;
+
   if (activeClients.has(clientId)) {
     console.log(`Client ${clientId} already active`);
     return activeClients.get(clientId);
   }
 
   console.log(`Initializing WhatsApp client: ${clientId}`);
+
+  if (forceReauth) {
+    console.log(`Clearing stale session data for ${clientId}`);
+    clearClientSessionData(clientId);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'disconnected', qrCode: null, phone: '' }
+    );
+  }
 
   const chromeExecutablePath =
     process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN;
@@ -55,7 +83,13 @@ const createWhatsAppClient = async (clientId) => {
       clientId: clientId,
       dataPath: SESSIONS_DIR
     }),
-    puppeteer: puppeteerConfig
+    puppeteer: puppeteerConfig,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0,
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+    }
   });
 
   // QR Code event
