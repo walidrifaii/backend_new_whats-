@@ -121,9 +121,36 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     takeoverTimeoutMs: 0
   });
 
+  const initTimeoutMs = parseInt(process.env.WA_INIT_TIMEOUT_MS || '90000', 10);
+  let initSettled = false;
+  const settleInit = () => {
+    initSettled = true;
+    if (initTimeoutHandle) clearTimeout(initTimeoutHandle);
+  };
+
+  // Prevent "initializing forever" when deployment cannot reach QR/ready.
+  const initTimeoutHandle = setTimeout(async () => {
+    if (initSettled) return;
+    console.error(`Initialization timeout for ${clientId} after ${initTimeoutMs}ms`);
+    activeClients.delete(clientId);
+    try {
+      await wClient.destroy();
+    } catch (_) {}
+
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'disconnected', qrCode: null }
+    );
+    emitToClient(clientId, 'init_error', {
+      clientId,
+      message: 'Initialization timed out. Please reconnect and check server Chrome/runtime.'
+    });
+  }, initTimeoutMs);
+
   // QR Code event
   wClient.on('qr', async (qr) => {
     console.log(`QR received for client: ${clientId}`);
+    settleInit();
     try {
       const qrDataUrl = await qrcode.toDataURL(qr);
       await WhatsAppClientModel.findOneAndUpdate(
@@ -139,6 +166,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   // Ready event
   wClient.on('ready', async () => {
     console.log(`✅ WhatsApp client ready: ${clientId}`);
+    settleInit();
     const info = wClient.info;
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
@@ -155,6 +183,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   // Auth failure event
   wClient.on('auth_failure', async (msg) => {
     console.error(`Auth failure for ${clientId}:`, msg);
+    settleInit();
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'auth_failure', qrCode: null }
@@ -166,6 +195,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   // Disconnected event
   wClient.on('disconnected', async (reason) => {
     console.log(`Client ${clientId} disconnected:`, reason);
+    settleInit();
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'disconnected', qrCode: null }
@@ -212,6 +242,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
     console.error(`Failed to initialize WhatsApp client ${clientId}:`, err);
+    settleInit();
     activeClients.delete(clientId);
     try {
       await WhatsAppClientModel.findOneAndUpdate(
