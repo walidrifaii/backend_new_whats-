@@ -296,22 +296,29 @@ const createWhatsAppClient = async (clientId, options = {}) => {
       const dbClient = await WhatsAppClientModel.findOne({ clientId });
       if (!dbClient) return;
 
-      console.log(`📨 Incoming message for ${clientId} from ${msg.from}: ${msg.body}`);
+      const bodyText = typeof msg.body === 'string' ? msg.body.trim() : '';
+      const captionText = typeof msg?._data?.caption === 'string' ? msg._data.caption.trim() : '';
+      const messageType = msg?.type || (msg?.hasMedia ? 'media' : 'unknown');
+      const messageTextForLog = bodyText || captionText || `[${messageType}]`;
+      const normalizedPhone = (msg.from || '').replace('@c.us', '');
+
+      console.log(`📨 Incoming message for ${clientId} from ${msg.from}: ${messageTextForLog}`);
 
       await MessageLog.create({
         userId: dbClient.userId,
         clientId: dbClient._id,
-        phone: msg.from.replace('@c.us', ''),
-        message: msg.body,
+        phone: normalizedPhone,
+        message: messageTextForLog,
         direction: 'incoming',
         status: 'received',
-        whatsappMessageId: msg.id._serialized
+        whatsappMessageId: msg?.id?._serialized
       });
 
       emitToClient(clientId, 'incoming-message', {
         clientId,
         from: msg.from,
-        body: msg.body,
+        body: bodyText || captionText || '',
+        type: messageType,
         timestamp: msg.timestamp
       });
     } catch (err) {
