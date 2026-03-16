@@ -284,7 +284,7 @@ const sendMessage = async (clientId, phone, message) => {
 const initWhatsAppManager = async () => {
   try {
     const connectedClients = await WhatsAppClientModel.find({
-      status: { $in: ['connected', 'initializing', 'qr_ready'] },
+      status: 'connected',
       isActive: true
     });
 

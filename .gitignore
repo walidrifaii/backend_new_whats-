@@ -1,0 +1,8 @@
+node_modules/
+sessions/
+uploads/
+.puppeteer/
+.env
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

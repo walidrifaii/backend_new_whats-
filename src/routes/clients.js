@@ -63,27 +63,41 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       return res.json({ message: 'Client already connected', client });
     }
 
+    const shouldForceReauth =
+      req.query.reset === '1' || req.body?.forceReauth === true;
+
+    if (isClientConnected(client.clientId) && !shouldForceReauth) {
+      return res.json({
+        message: 'Client is already initializing. Wait for QR/ready event.',
+        clientId: client.clientId
+      });
+    }
+
     // Respond immediately to avoid request hanging in deployments.
     await WhatsAppClientModel.findByIdAndUpdate(client._id, { status: 'initializing' });
     res.json({
-      message: 'WhatsApp initialization started. Scan QR code when ready.',
+      message: shouldForceReauth
+        ? 'WhatsApp re-auth started. Scan new QR code when ready.'
+        : 'WhatsApp initialization started. Scan QR code when ready.',
       clientId: client.clientId
     });
 
     // Run teardown + initialization in background.
     (async () => {
-      try {
-        await withTimeout(
-          destroyClient(client.clientId),
-          12000,
-          `Destroy client timeout for ${client.clientId}`
-        );
-      } catch (destroyErr) {
-        console.warn(`Destroy warning for ${client.clientId}:`, destroyErr.message);
+      if (shouldForceReauth) {
+        try {
+          await withTimeout(
+            destroyClient(client.clientId),
+            12000,
+            `Destroy client timeout for ${client.clientId}`
+          );
+        } catch (destroyErr) {
+          console.warn(`Destroy warning for ${client.clientId}:`, destroyErr.message);
+        }
       }
 
       try {
-        await createWhatsAppClient(client.clientId, { forceReauth: true });
+        await createWhatsAppClient(client.clientId, { forceReauth: shouldForceReauth });
       } catch (err) {
         console.error(`Init error for ${client.clientId}:`, err);
       }
