@@ -51,13 +51,23 @@ class ContactModel {
     if (options.sort?.createdAt === -1) sql += ' ORDER BY created_at DESC';
     else sql += ' ORDER BY created_at ASC';
 
-    if (options.limit !== undefined) {
-      sql += ' LIMIT ?';
-      values.push(Number(options.limit));
+    if (options.limit !== undefined && options.limit !== null) {
+      const limit = Number(options.limit);
+      if (Number.isFinite(limit) && limit > 0) {
+        // Keep LIMIT/OFFSET as numeric literals to avoid prepared-statement
+        // argument issues on some MySQL/MariaDB deployments.
+        sql += ` LIMIT ${Math.floor(limit)}`;
+      }
     }
-    if (options.offset !== undefined) {
-      sql += ' OFFSET ?';
-      values.push(Number(options.offset));
+    if (options.offset !== undefined && options.offset !== null) {
+      const offset = Number(options.offset);
+      if (Number.isFinite(offset) && offset >= 0) {
+        // MySQL requires LIMIT before OFFSET.
+        if (!/ LIMIT \d+$/i.test(sql)) {
+          sql += ` LIMIT 18446744073709551615`;
+        }
+        sql += ` OFFSET ${Math.floor(offset)}`;
+      }
     }
 
     const rows = await query(sql, values);
