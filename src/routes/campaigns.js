@@ -9,10 +9,17 @@ const authMiddleware = require('../middleware/auth');
 // GET /api/campaigns
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const campaigns = await Campaign.find({ userId: req.user._id })
-      .populate('clientId', 'name status clientId phone')
-      .sort({ createdAt: -1 });
-    res.json({ campaigns });
+    const campaigns = await Campaign.find(
+      { userId: req.user._id },
+      { sort: { createdAt: -1 } }
+    );
+    const clients = await WhatsAppClientModel.find({ userId: req.user._id, isActive: true });
+    const clientsById = new Map(clients.map((c) => [c._id, c]));
+    const hydratedCampaigns = campaigns.map((campaign) => ({
+      ...campaign,
+      clientId: clientsById.get(campaign.clientId) || campaign.clientId
+    }));
+    res.json({ campaigns: hydratedCampaigns });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -56,10 +63,10 @@ router.post('/', authMiddleware, [
 // GET /api/campaigns/:id
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id })
-      .populate('clientId', 'name status clientId phone');
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    res.json({ campaign });
+    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: req.user._id });
+    res.json({ campaign: { ...campaign, clientId: client || campaign.clientId } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -68,15 +75,16 @@ router.get('/:id', authMiddleware, async (req, res) => {
 // POST /api/campaigns/:id/start
 router.post('/:id/start', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id })
-      .populate('clientId');
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: req.user._id });
+    if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
 
     if (!['draft', 'paused'].includes(campaign.status)) {
       return res.status(400).json({ error: `Cannot start campaign in status: ${campaign.status}` });
     }
 
-    if (campaign.clientId.status !== 'connected') {
+    if (client.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }
 

@@ -16,8 +16,10 @@ const withTimeout = (promise, ms, message) => {
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const clients = await WhatsAppClientModel.find({ userId: req.user._id, isActive: true })
-      .sort({ createdAt: -1 });
+    const clients = await WhatsAppClientModel.find(
+      { userId: req.user._id, isActive: true },
+      { sort: { createdAt: -1 } }
+    );
     res.json({ clients });
   } catch (err) {
     res.status(500).json({ error: err.message });

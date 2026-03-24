@@ -17,12 +17,13 @@ const pausedCampaigns = new Set();
  * send messages with delay, update progress
  */
 const processCampaign = async (campaignId) => {
-  const campaign = await Campaign.findById(campaignId).populate('clientId');
+  const campaign = await Campaign.findById(campaignId);
   if (!campaign) return;
 
   if (campaign.status !== 'running') return;
 
-  const dbClient = campaign.clientId;
+  const dbClient = await WhatsAppClientModel.findOne({ _id: campaign.clientId, isActive: true });
+  if (!dbClient) return;
   const clientId = dbClient.clientId;
 
   console.log(`🚀 Starting campaign ${campaignId} via client ${clientId}`);
@@ -39,10 +40,10 @@ const processCampaign = async (campaignId) => {
     }
 
     // Fetch next batch of pending contacts
-    const contacts = await Contact.find({
-      campaignId,
-      status: 'pending'
-    }).limit(10);
+    const contacts = await Contact.find(
+      { campaignId, status: 'pending' },
+      { limit: 10, sort: { createdAt: 1 } }
+    );
 
     if (contacts.length === 0) {
       hasMore = false;
@@ -61,7 +62,7 @@ const processCampaign = async (campaignId) => {
       const variables = {
         name: contact.name || '',
         phone: contact.phone,
-        ...(contact.variables ? Object.fromEntries(contact.variables) : {})
+        ...((contact.variables && typeof contact.variables === 'object') ? contact.variables : {})
       };
       const renderedMessage = renderTemplate(campaign.message, variables);
 

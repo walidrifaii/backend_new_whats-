@@ -35,16 +35,19 @@ router.get('/:campaignId', authMiddleware, async (req, res) => {
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     const { page = 1, limit = 50, status } = req.query;
+    const pageNumber = parseInt(page, 10) || 1;
+    const limitNumber = parseInt(limit, 10) || 50;
     const filter = { campaignId: req.params.campaignId };
     if (status) filter.status = status;
 
-    const contacts = await Contact.find(filter)
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit))
-      .sort({ createdAt: 1 });
+    const contacts = await Contact.find(filter, {
+      offset: (pageNumber - 1) * limitNumber,
+      limit: limitNumber,
+      sort: { createdAt: 1 }
+    });
     const total = await Contact.countDocuments(filter);
 
-    res.json({ contacts, total, page: parseInt(page), limit: parseInt(limit) });
+    res.json({ contacts, total, page: pageNumber, limit: limitNumber });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -88,7 +91,7 @@ router.post('/:campaignId/upload', authMiddleware, upload.single('contacts'), as
 
       // Extract known fields and put rest in variables
       const { phone: _p, name, ...rest } = row;
-      const variables = new Map(Object.entries(rest).filter(([, v]) => v));
+      const variables = Object.fromEntries(Object.entries(rest).filter(([, v]) => v));
 
       contactDocs.push({
         userId: req.user._id,
@@ -139,7 +142,7 @@ router.post('/:campaignId/add', authMiddleware, async (req, res) => {
       campaignId: campaign._id,
       phone: phone.trim(),
       name: name?.trim() || '',
-      variables: new Map(Object.entries(variables))
+      variables: Object.fromEntries(Object.entries(variables))
     });
 
     await Campaign.findByIdAndUpdate(campaign._id, { $inc: { totalContacts: 1 } });
