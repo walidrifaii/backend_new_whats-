@@ -100,9 +100,13 @@ class CampaignModel {
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
     sql += options.sort?.createdAt === 1 ? ' ORDER BY created_at ASC' : ' ORDER BY created_at DESC';
 
-    if (options.limit) {
-      sql += ' LIMIT ?';
-      values.push(options.limit);
+    if (options.limit !== undefined && options.limit !== null) {
+      const limit = Number(options.limit);
+      if (Number.isFinite(limit) && limit > 0) {
+        // Keep LIMIT as a numeric literal to avoid prepared-statement
+        // argument issues seen on some MySQL/MariaDB deployments.
+        sql += ` LIMIT ${Math.floor(limit)}`;
+      }
     }
 
     const rows = await query(sql, values);
@@ -120,6 +124,11 @@ class CampaignModel {
 
   static async create(data) {
     const id = generateObjectId();
+    const userId = String(data.userId || '').trim();
+    const clientId = String(data.clientId || '').trim();
+    if (!userId) throw new Error('userId is required');
+    if (!clientId) throw new Error('clientId is required');
+
     const totalContacts = data.totalContacts || 0;
     const sentCount = data.sentCount || 0;
     const failedCount = data.failedCount || 0;
@@ -133,10 +142,10 @@ class CampaignModel {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
-        data.userId,
-        data.clientId,
-        data.name,
-        data.message,
+        userId,
+        clientId,
+        String(data.name || '').trim(),
+        String(data.message || '').trim(),
         data.mediaUrl || null,
         data.mediaType || null,
         data.status || 'draft',
