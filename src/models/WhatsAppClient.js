@@ -100,9 +100,13 @@ class WhatsAppClientModel {
     else if (options.sort?.createdAt === 1) sql += ' ORDER BY created_at ASC';
     else sql += ' ORDER BY created_at DESC';
 
-    if (options.limit) {
-      sql += ' LIMIT ?';
-      values.push(options.limit);
+    if (options.limit !== undefined && options.limit !== null) {
+      const limit = Number(options.limit);
+      if (Number.isFinite(limit) && limit > 0) {
+        // Keep LIMIT as a numeric literal to avoid prepared-statement
+        // argument issues seen on some MySQL/MariaDB deployments.
+        sql += ` LIMIT ${Math.floor(limit)}`;
+      }
     }
 
     const rows = await query(sql, values);
@@ -116,6 +120,11 @@ class WhatsAppClientModel {
 
   static async create(data) {
     const id = generateObjectId();
+    const userId = String(data.userId || '').trim();
+    if (!userId) {
+      throw new Error('userId is required');
+    }
+
     await query(
       `INSERT INTO whatsapp_clients (
         id, user_id, name, phone, client_id, status, qr_code, session_path,
@@ -123,10 +132,10 @@ class WhatsAppClientModel {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
-        data.userId,
-        data.name,
+        userId,
+        String(data.name || '').trim(),
         data.phone || null,
-        data.clientId,
+        String(data.clientId || '').trim(),
         data.status || 'disconnected',
         data.qrCode || null,
         data.sessionPath || null,
