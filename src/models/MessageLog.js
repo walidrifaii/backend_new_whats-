@@ -85,8 +85,13 @@ class MessageLogModel {
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
     sql += ' ORDER BY ml.timestamp DESC';
-    sql += ' LIMIT ? OFFSET ?';
-    values.push(Number(options.limit || 50), Number(options.offset || 0));
+    const limit = Number(options.limit || 50);
+    const offset = Number(options.offset || 0);
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+    const safeOffset = Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : 0;
+    // Keep LIMIT/OFFSET as numeric literals to avoid prepared-statement
+    // argument issues on some MySQL/MariaDB deployments.
+    sql += ` LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
     const rows = await query(sql, values);
     return rows.map((row) => {
