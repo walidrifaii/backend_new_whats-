@@ -12,6 +12,7 @@ const campaignRoutes = require('./routes/campaigns');
 const contactRoutes = require('./routes/contacts');
 const messageRoutes = require('./routes/messages');
 const logRoutes = require('./routes/logs');
+const adminRoutes = require('./routes/admin');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
@@ -71,6 +72,7 @@ app.use('/api/campaigns', campaignRoutes);
 app.use('/api/contacts', contactRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/logs', logRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 

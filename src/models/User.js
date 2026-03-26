@@ -12,6 +12,7 @@ const mapRowToUser = (row) => {
     password: row.password,
     role: row.role,
     isActive: !!row.is_active,
+    messageBalance: row.message_balance ?? 0,
     createdAt: row.created_at,
     async comparePassword(password) {
       return bcrypt.compare(password, this.password);
@@ -27,6 +28,8 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
+  static COLUMNS = 'id, name, email, password, role, is_active, message_balance, created_at';
+
   static async findOne(filter = {}) {
     const clauses = [];
     const values = [];
@@ -49,10 +52,7 @@ class UserModel {
     }
 
     const rows = await query(
-      `SELECT id, name, email, password, role, is_active, created_at
-       FROM users
-       WHERE ${clauses.join(' AND ')}
-       LIMIT 1`,
+      `SELECT ${this.COLUMNS} FROM users WHERE ${clauses.join(' AND ')} LIMIT 1`,
       values
     );
     return mapRowToUser(rows[0]);
@@ -60,13 +60,17 @@ class UserModel {
 
   static async findById(id) {
     const rows = await query(
-      `SELECT id, name, email, password, role, is_active, created_at
-       FROM users
-       WHERE id = ?
-       LIMIT 1`,
+      `SELECT ${this.COLUMNS} FROM users WHERE id = ? LIMIT 1`,
       [id]
     );
     return mapRowToUser(rows[0]);
+  }
+
+  static async findAll() {
+    const rows = await query(
+      `SELECT ${this.COLUMNS} FROM users ORDER BY created_at DESC`
+    );
+    return rows.map(mapRowToUser);
   }
 
   static async create(data) {
@@ -76,14 +80,39 @@ class UserModel {
     const hashedPassword = await bcrypt.hash(String(data.password || ''), 10);
     const role = data.role === 'admin' ? 'admin' : 'user';
     const isActive = data.isActive === undefined ? true : !!data.isActive;
+    const messageBalance = parseInt(data.messageBalance) || 0;
 
     await query(
-      `INSERT INTO users (id, name, email, password, role, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [id, name, email, hashedPassword, role, isActive ? 1 : 0]
+      `INSERT INTO users (id, name, email, password, role, is_active, message_balance, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [id, name, email, hashedPassword, role, isActive ? 1 : 0, messageBalance]
     );
 
     return this.findById(id);
+  }
+
+  static async updateBalance(userId, newBalance) {
+    await query(
+      `UPDATE users SET message_balance = ? WHERE id = ?`,
+      [newBalance, userId]
+    );
+    return this.findById(userId);
+  }
+
+  static async decrementBalance(userId, amount = 1) {
+    await query(
+      `UPDATE users SET message_balance = GREATEST(message_balance - ?, 0) WHERE id = ?`,
+      [amount, userId]
+    );
+    return this.findById(userId);
+  }
+
+  static async getBalance(userId) {
+    const rows = await query(
+      `SELECT message_balance FROM users WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+    return rows[0]?.message_balance ?? 0;
   }
 }
 

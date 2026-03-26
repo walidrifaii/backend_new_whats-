@@ -2,8 +2,16 @@ const express = require('express');
 const router = express.Router();
 const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
+const User = require('../models/User');
 const { sendMessage } = require('../services/whatsappManager');
+const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const authMiddleware = require('../middleware/auth');
+
+const logBalanceEmailResult = (context, result, email) => {
+  console.log(
+    `[BALANCE_EMAIL] context=${context} ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${email || 'n/a'}`
+  );
+};
 
 // POST /api/messages/send - Send a single message
 router.post('/send', authMiddleware, async (req, res) => {
@@ -11,6 +19,22 @@ router.post('/send', authMiddleware, async (req, res) => {
     const { clientId, phone, message } = req.body;
     if (!clientId || !phone || !message) {
       return res.status(400).json({ error: 'clientId, phone, and message are required' });
+    }
+
+    const balance = await User.getBalance(req.user._id);
+    if (balance <= 0) {
+      sendBalanceExhaustedEmail({
+        userId: req.user._id,
+        email: req.user.email,
+        name: req.user.name
+      })
+        .then((result) => logBalanceEmailResult('single_send_blocked', result, req.user.email))
+        .catch((err) => logBalanceEmailResult('single_send_blocked', { ok: false, reason: err.message }, req.user.email));
+      return res.status(403).json({
+        error: 'You need to charge balance in message.',
+        balanceExhausted: true,
+        currentBalance: 0
+      });
     }
 
     const dbClient = await WhatsAppClientModel.findOne({
@@ -25,6 +49,18 @@ router.post('/send', authMiddleware, async (req, res) => {
 
     const result = await sendMessage(dbClient.clientId, phone, message);
 
+    await User.decrementBalance(req.user._id, 1);
+    const updatedBalance = await User.getBalance(req.user._id);
+    if (updatedBalance <= 0) {
+      sendBalanceExhaustedEmail({
+        userId: req.user._id,
+        email: req.user.email,
+        name: req.user.name
+      })
+        .then((result) => logBalanceEmailResult('single_send_reached_zero', result, req.user.email))
+        .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, req.user.email));
+    }
+
     await MessageLog.create({
       userId: req.user._id,
       clientId: dbClient._id,
@@ -35,7 +71,11 @@ router.post('/send', authMiddleware, async (req, res) => {
       whatsappMessageId: result?.id?._serialized
     });
 
-    res.json({ message: 'Message sent', messageId: result?.id?._serialized });
+    res.json({
+      message: 'Message sent',
+      messageId: result?.id?._serialized,
+      remainingBalance: updatedBalance
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
