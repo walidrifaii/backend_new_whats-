@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Admin = require('../models/Admin');
+const TokenSession = require('../models/TokenSession');
 
 const authMiddleware = async (req, res, next) => {
   try {
@@ -11,6 +12,11 @@ const authMiddleware = async (req, res, next) => {
 
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const validSession = await TokenSession.isValid(token);
+    if (!validSession) {
+      return res.status(401).json({ error: 'Session expired. Please login again.' });
+    }
+    req.token = token;
     
     if (decoded.adminId) {
       const admin = await Admin.findById(decoded.adminId);
@@ -26,8 +32,12 @@ const authMiddleware = async (req, res, next) => {
     if (!user || !user.isActive) {
       return res.status(401).json({ error: 'User not found or inactive' });
     }
+    if (!user.authToken || user.authToken !== token) {
+      return res.status(401).json({ error: 'Session revoked. Please login again.' });
+    }
 
     delete user.password;
+    delete user.authToken;
     user.isAdmin = false;
     req.user = user;
     return next();

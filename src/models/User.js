@@ -12,6 +12,7 @@ const mapRowToUser = (row) => {
     password: row.password,
     role: row.role,
     isActive: !!row.is_active,
+    authToken: row.api_token || row.auth_token || null,
     messageBalance: row.message_balance ?? 0,
     createdAt: row.created_at,
     async comparePassword(password) {
@@ -20,6 +21,7 @@ const mapRowToUser = (row) => {
     toJSON() {
       const safe = { ...this };
       delete safe.password;
+      delete safe.authToken;
       delete safe.comparePassword;
       delete safe.toJSON;
       return safe;
@@ -28,7 +30,31 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
-  static COLUMNS = 'id, name, email, password, role, is_active, message_balance, created_at';
+  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, created_at';
+
+  static async ensureAuthTokenColumn() {
+    try {
+      await query(`ALTER TABLE users ADD COLUMN auth_token TEXT NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD COLUMN api_token TEXT NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD COLUMN api_token_created_at DATETIME NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+  }
 
   static async findOne(filter = {}) {
     const clauses = [];
@@ -113,6 +139,24 @@ class UserModel {
       [userId]
     );
     return rows[0]?.message_balance ?? 0;
+  }
+
+  static async saveToken(userId, token) {
+    await query(
+      `UPDATE users
+       SET auth_token = ?, api_token = ?, api_token_created_at = NOW()
+       WHERE id = ?`,
+      [String(token), String(token), String(userId)]
+    );
+  }
+
+  static async clearToken(userId) {
+    await query(
+      `UPDATE users
+       SET auth_token = NULL, api_token = NULL, api_token_created_at = NULL
+       WHERE id = ?`,
+      [String(userId)]
+    );
   }
 }
 

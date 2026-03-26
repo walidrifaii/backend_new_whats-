@@ -13,6 +13,8 @@ const contactRoutes = require('./routes/contacts');
 const messageRoutes = require('./routes/messages');
 const logRoutes = require('./routes/logs');
 const adminRoutes = require('./routes/admin');
+const TokenSession = require('./models/TokenSession');
+const User = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
@@ -166,8 +168,10 @@ if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_NAME) {
 }
 
 testConnection()
-  .then((ok) => {
+  .then(async (ok) => {
     if (!ok) throw new Error('MySQL ping failed');
+    await TokenSession.init();
+    await User.ensureAuthTokenColumn();
     console.log('✅ MySQL connected');
     initWhatsAppManager();
     server.listen(process.env.PORT || 5000, () => {

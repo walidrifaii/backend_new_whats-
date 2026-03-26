@@ -4,7 +4,14 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const Admin = require('../models/Admin');
+const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
+
+const getTokenExpiryDate = (token) => {
+  const decoded = jwt.decode(token);
+  if (!decoded?.exp) return null;
+  return new Date(decoded.exp * 1000);
+};
 
 // POST /api/auth/register
 router.post('/register', [
@@ -22,6 +29,13 @@ router.post('/register', [
 
     const user = await User.create({ name, email, password });
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    await User.saveToken(user._id, token);
+    await TokenSession.createOrUpdate({
+      token,
+      ownerType: 'user',
+      ownerId: user._id,
+      expiresAt: getTokenExpiryDate(token)
+    });
     res.status(201).json({ token, user });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -46,6 +60,13 @@ router.post('/login', [
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    await User.saveToken(user._id, token);
+    await TokenSession.createOrUpdate({
+      token,
+      ownerType: 'user',
+      ownerId: user._id,
+      expiresAt: getTokenExpiryDate(token)
+    });
     return res.json({ token, user });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -75,6 +96,12 @@ router.post('/admin-login', [
     }
 
     const token = jwt.sign({ adminId: admin._id, type: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    await TokenSession.createOrUpdate({
+      token,
+      ownerType: 'admin',
+      ownerId: admin._id,
+      expiresAt: getTokenExpiryDate(token)
+    });
     const safeAdmin = { ...admin };
     delete safeAdmin.password;
     return res.json({ token, user: safeAdmin });
@@ -86,6 +113,21 @@ router.post('/admin-login', [
 // GET /api/auth/me
 router.get('/me', authMiddleware, async (req, res) => {
   res.json({ user: req.user });
+});
+
+// POST /api/auth/logout
+router.post('/logout', authMiddleware, async (req, res) => {
+  try {
+    if (!req.user?.isAdmin && req.user?._id) {
+      await User.clearToken(req.user._id);
+    }
+    if (req.token) {
+      await TokenSession.revoke(req.token);
+    }
+    return res.json({ message: 'Logged out successfully' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
