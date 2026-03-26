@@ -5,6 +5,7 @@ const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
+const { buildClientQrToken } = require('../utils/qrShare');
 
 const withTimeout = (promise, ms, message) => {
   return Promise.race([
@@ -135,6 +136,37 @@ router.get('/:id', authMiddleware, async (req, res) => {
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
     res.json({ client });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/clients/:id/qr-share-link - get QR-only public links for one client
+router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+      isActive: true
+    });
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const token = buildClientQrToken(client.clientId);
+    if (!token) {
+      return res.status(500).json({
+        error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
+      });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const pageUrl = `${baseUrl}/public/qr/${client.clientId}?token=${token}`;
+    const imageUrl = `${baseUrl}/public/qr/${client.clientId}.png?token=${token}`;
+
+    res.json({
+      clientId: client.clientId,
+      pageUrl,
+      imageUrl
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
