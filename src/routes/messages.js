@@ -7,15 +7,12 @@ const { sendMessage } = require('../services/whatsappManager');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const authMiddleware = require('../middleware/auth');
 
-<<<<<<< HEAD
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
     `[BALANCE_EMAIL] context=${context} ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${email || 'n/a'}`
   );
 };
 
-// POST /api/messages/send - Send a single message
-=======
 const generateOtpCode = (length = 6) => {
   const safeLength = Number.isInteger(length) && length >= 4 && length <= 8 ? length : 6;
   let code = '';
@@ -26,7 +23,6 @@ const generateOtpCode = (length = 6) => {
 };
 
 // POST /api/messages/send - Send a single message (optional image via public URL)
->>>>>>> 4301074 ( upload image)
 router.post('/send', authMiddleware, async (req, res) => {
   try {
     const { clientId, phone, message, caption, imageUrl, mediaUrl } = req.body;

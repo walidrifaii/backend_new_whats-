@@ -1,4 +1,5 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
@@ -28,22 +29,16 @@ router.post('/register', [
     if (existing) return res.status(400).json({ error: 'Email already registered' });
 
     const user = await User.create({ name, email, password });
-<<<<<<< HEAD
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    await User.saveToken(user._id, token);
+    const token = issueDashboardToken(user._id);
+    const apiToken = issueApiToken(user._id);
+    await User.saveToken(user._id, token, apiToken);
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'user',
       ownerId: user._id,
       expiresAt: getTokenExpiryDate(token)
     });
-    res.status(201).json({ token, user });
-=======
-    const token = issueDashboardToken(user._id);
-    const apiToken = issueApiToken(user._id);
-    await User.updateApiToken(user._id, apiToken);
     res.status(201).json({ token, apiToken, user });
->>>>>>> 4301074 ( upload image)
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -66,25 +61,19 @@ router.post('/login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-<<<<<<< HEAD
-    const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    await User.saveToken(user._id, token);
+    const token = issueDashboardToken(user._id);
+    let apiToken = user.apiToken;
+    if (!apiToken) {
+      apiToken = issueApiToken(user._id);
+    }
+    await User.saveToken(user._id, token, apiToken);
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'user',
       ownerId: user._id,
       expiresAt: getTokenExpiryDate(token)
     });
-    return res.json({ token, user });
-=======
-    const token = issueDashboardToken(user._id);
-    let apiToken = user.apiToken;
-    if (!apiToken) {
-      apiToken = issueApiToken(user._id);
-      await User.updateApiToken(user._id, apiToken);
-    }
-    res.json({ token, apiToken, user });
->>>>>>> 4301074 ( upload image)
+    return res.json({ token, apiToken, user });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -132,7 +121,6 @@ router.get('/me', authMiddleware, async (req, res) => {
   res.json({ user: req.user });
 });
 
-<<<<<<< HEAD
 // POST /api/auth/logout
 router.post('/logout', authMiddleware, async (req, res) => {
   try {
@@ -145,7 +133,9 @@ router.post('/logout', authMiddleware, async (req, res) => {
     return res.json({ message: 'Logged out successfully' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
-=======
+  }
+});
+
 // POST /api/auth/api-token - create/recreate API token for external websites
 router.post('/api-token', authMiddleware, async (req, res) => {
   try {
@@ -157,7 +147,6 @@ router.post('/api-token', authMiddleware, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
->>>>>>> 4301074 ( upload image)
   }
 });
 

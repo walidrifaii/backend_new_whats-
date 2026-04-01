@@ -32,17 +32,25 @@ const authMiddleware = async (req, res, next) => {
     if (!user || !user.isActive) {
       return res.status(401).json({ error: 'User not found or inactive' });
     }
-    if (!user.authToken || user.authToken !== token) {
-      return res.status(401).json({ error: 'Session revoked. Please login again.' });
-    }
 
-    // If API token is rotated, old tokens are rejected.
-    if (decoded.tokenType === 'api' && user.apiToken && user.apiToken !== token) {
-      return res.status(401).json({ error: 'API token is no longer valid' });
+    const isApi = decoded.tokenType === 'api';
+    if (isApi) {
+      if (!user.apiToken || user.apiToken !== token) {
+        return res.status(401).json({ error: 'API token is no longer valid' });
+      }
+    } else {
+      const sessionOk = user.sessionToken && user.sessionToken === token;
+      const legacyOk =
+        !user.sessionToken &&
+        user.apiToken &&
+        user.apiToken === token;
+      if (!sessionOk && !legacyOk) {
+        return res.status(401).json({ error: 'Session revoked. Please login again.' });
+      }
     }
 
     delete user.password;
-    delete user.authToken;
+    delete user.sessionToken;
     user.isAdmin = false;
     req.user = user;
     return next();
