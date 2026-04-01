@@ -17,10 +17,44 @@ const renderTemplate = (template, variables = {}) => {
  * Normalizes a phone number to WhatsApp format (country code + number + @c.us)
  */
 const normalizePhone = (phone) => {
-  let cleaned = phone.toString().replace(/\D/g, '');
+  const raw = String(phone).trim();
+  if (/@(c|g)\.us$/i.test(raw)) {
+    return raw.replace(/\s/g, '');
+  }
+  let cleaned = raw.replace(/\D/g, '');
   if (cleaned.startsWith('0')) cleaned = cleaned.substring(1);
-  if (!cleaned.includes('@')) return `${cleaned}@c.us`;
-  return cleaned;
+  return `${cleaned}@c.us`;
+};
+
+/**
+ * Best-effort string for logs/DB when whatsapp-web.js or Puppeteer throws opaque errors (e.g. message "t").
+ */
+const formatErrorForLog = (err) => {
+  if (err == null) return String(err);
+  if (typeof err === 'string') return err;
+  const msg = typeof err.message === 'string' ? err.message : '';
+  const causeMsg =
+    err.cause && typeof err.cause === 'object' && typeof err.cause.message === 'string'
+      ? err.cause.message
+      : '';
+  const code = err.code != null && err.code !== '' ? `code=${err.code}` : '';
+  let out = [msg, causeMsg, code].filter(Boolean).join(' | ');
+  if (!out || out.length < 4) {
+    const stackLine = typeof err.stack === 'string' ? err.stack.split('\n')[1]?.trim() : '';
+    if (stackLine) out = msg ? `${msg} — ${stackLine}` : stackLine;
+  }
+  if (!out) {
+    try {
+      const s = Object.prototype.toString.call(err);
+      if (s && s !== '[object Object]') return s;
+    } catch (_) {}
+    try {
+      return JSON.stringify(err);
+    } catch (_) {
+      return 'Unknown error';
+    }
+  }
+  return out;
 };
 
 /**
@@ -35,4 +69,4 @@ const randomDelay = (min = 20000, max = 30000) => {
  */
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-module.exports = { renderTemplate, normalizePhone, randomDelay, sleep };
+module.exports = { renderTemplate, normalizePhone, randomDelay, sleep, formatErrorForLog };

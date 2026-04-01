@@ -6,7 +6,7 @@ const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { query } = require('../db/mysql');
 const { sendMessage } = require('./whatsappManager');
-const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils/helpers');
+const { renderTemplate, normalizePhone, sleep, randomDelay, formatErrorForLog } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
 
@@ -153,8 +153,11 @@ const processCampaign = async (campaignId) => {
         success = true;
         console.log(`✅ Sent to ${phone} for campaign ${campaignId}`);
       } catch (err) {
-        error = err.message;
-        console.error(`❌ Failed to send to ${phone}:`, err.message);
+        error = formatErrorForLog(err);
+        console.error(`❌ Failed to send to ${phone}:`, error);
+        if (typeof err?.stack === 'string' && err.stack.length > 80) {
+          console.error(err.stack.split('\n').slice(0, 4).join('\n'));
+        }
       }
 
       // Decrement user balance on successful send
