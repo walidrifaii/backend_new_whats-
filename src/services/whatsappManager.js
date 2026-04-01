@@ -381,6 +381,16 @@ const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const caption = typeof message === 'string' ? message : '';
 
+  const digitsOnly = chatId.replace(/@c\.us$/i, '').replace(/\D/g, '');
+  const registered = await wClient.getNumberId(digitsOnly);
+  if (!registered) {
+    throw new Error('This phone number is not registered on WhatsApp');
+  }
+  const targetChatId = registered._serialized || chatId;
+
+  // Cold outreach: marking "seen" before the first outbound message can fail inside WA Web for new threads.
+  const sendOpts = { sendSeen: false };
+
   let result;
   const trimmedUrl = typeof mediaUrl === 'string' ? mediaUrl.trim() : '';
 
@@ -401,9 +411,20 @@ const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
         throw new Error(`Failed to load media from URL: ${reason}`);
       }
     }
-    result = await wClient.sendMessage(chatId, media, { caption: caption || undefined });
+    result = await wClient.sendMessage(targetChatId, media, {
+      ...sendOpts,
+      caption: caption || undefined
+    });
   } else {
-    result = await wClient.sendMessage(chatId, message);
+    const text = typeof message === 'string' ? message : '';
+    if (!text.trim()) {
+      throw new Error('Cannot send an empty text message');
+    }
+    result = await wClient.sendMessage(targetChatId, text, sendOpts);
+  }
+
+  if (!result) {
+    throw new Error('WhatsApp accepted no message (no chat). Try again or check the number.');
   }
 
   // Update message count
