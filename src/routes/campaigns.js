@@ -28,7 +28,7 @@ router.post('/', authMiddleware, [
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const { name, message, clientId, minDelay, maxDelay, imageUrl, caption } = req.body;
+    const { name, message, clientId, minDelay, maxDelay } = req.body;
 
     const client = await WhatsAppClientModel.findOne({
       _id: clientId,
@@ -41,10 +41,7 @@ router.post('/', authMiddleware, [
       userId: req.user._id,
       clientId,
       name,
-      message: caption || message,          // caption takes priority when image is present
-      imageUrl: imageUrl || null,
-      mediaUrl: imageUrl || null,
-      mediaType: imageUrl ? 'image' : null,
+      message,
       minDelay: minDelay || 20000,
       maxDelay: maxDelay || 30000,
       status: 'draft'
