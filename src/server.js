@@ -63,6 +63,15 @@ setSocketIO(io);
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+// Prevent proxies/browsers from caching API responses (304 on repeat requests breaks axios POST expectations).
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
