@@ -1,8 +1,10 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
+const http = require('http');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
@@ -21,7 +23,6 @@ const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 
 const getDefaultSessionsDir = () => {
-  // On cloud hosts, app directory may be ephemeral/restricted.
   if (process.env.NODE_ENV === 'production') {
     return path.join(os.tmpdir(), 'wwebjs-sessions');
   }
@@ -32,7 +33,6 @@ const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)
   : getDefaultSessionsDir();
 
-// Ensure sessions directory exists
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
@@ -47,7 +47,6 @@ const resolveBundledChromePath = () => {
 
   if (!linuxBuilds.length) return null;
 
-  // Pick the newest downloaded build directory.
   const latestLinuxBuild = linuxBuilds[linuxBuilds.length - 1];
   const executablePath = path.join(
     chromeRoot,
@@ -70,9 +69,7 @@ const removePathIfExists = (targetPath) => {
 };
 
 const clearClientSessionData = (clientId) => {
-  // whatsapp-web.js LocalAuth usually stores session as "session-<clientId>".
   removePathIfExists(path.join(SESSIONS_DIR, `session-${clientId}`));
-  // Keep compatibility with older/custom layouts.
   removePathIfExists(path.join(SESSIONS_DIR, clientId));
 };
 
@@ -109,6 +106,50 @@ const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries })
     ' If running on Render free tier, warm-up/cold starts can delay QR. Check Chrome path and increase WA_INIT_TIMEOUT_MS.';
 
   return `${base}${attemptText}${details}${hint}`;
+};
+
+/**
+ * Downloads an image from a URL and returns a whatsapp-web.js MessageMedia object.
+ * Falls back gracefully on failure.
+ */
+const fetchMediaFromUrl = (url) => {
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https') ? https : http;
+
+    const request = protocol.get(url, { timeout: 15000 }, (res) => {
+      // Follow redirects (up to 5)
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        return fetchMediaFromUrl(res.headers.location).then(resolve).catch(reject);
+      }
+
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode} fetching media: ${url}`));
+      }
+
+      const contentType = res.headers['content-type'] || 'image/jpeg';
+      const mimeType = contentType.split(';')[0].trim();
+
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const base64 = buffer.toString('base64');
+
+        // Derive a filename from the URL
+        const urlPath = new URL(url).pathname;
+        const filename = path.basename(urlPath) || 'media';
+
+        resolve(new MessageMedia(mimeType, base64, filename));
+      });
+      res.on('error', reject);
+    });
+
+    request.on('error', reject);
+    request.on('timeout', () => {
+      request.destroy();
+      reject(new Error(`Timeout fetching media from: ${url}`));
+    });
+  });
 };
 
 /**
@@ -226,14 +267,12 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     });
   };
 
-  // Prevent "initializing forever" when deployment cannot reach QR/ready.
   const initTimeoutHandle = setTimeout(async () => {
     if (initSettled) return;
     console.error(`Initialization timeout for ${clientId} after ${initTimeoutMs}ms`);
     await scheduleRetry({ timedOut: true });
   }, initTimeoutMs);
 
-  // QR Code event
   wClient.on('qr', async (qr) => {
     console.log(`QR received for client: ${clientId}`);
     settleInit();
@@ -249,7 +288,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     }
   });
 
-  // Ready event
   wClient.on('ready', async () => {
     console.log(`✅ WhatsApp client ready: ${clientId}`);
     settleInit();
@@ -266,7 +304,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     emitToClient(clientId, 'ready', { clientId, phone: info?.wid?.user });
   });
 
-  // Auth failure event
   wClient.on('auth_failure', async (msg) => {
     console.error(`Auth failure for ${clientId}:`, msg);
     settleInit();
@@ -278,7 +315,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     activeClients.delete(clientId);
   });
 
-  // Disconnected event
   wClient.on('disconnected', async (reason) => {
     console.log(`Client ${clientId} disconnected:`, reason);
     settleInit();
@@ -290,7 +326,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     activeClients.delete(clientId);
   });
 
-  // Incoming message event
   wClient.on('message', async (msg) => {
     try {
       const dbClient = await WhatsAppClientModel.findOne({ clientId });
@@ -326,7 +361,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     }
   });
 
-  // Initialize the client
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
     { status: 'initializing' }
@@ -366,7 +400,7 @@ const destroyClient = async (clientId) => {
 };
 
 /**
- * Send a message using an active client
+ * Send a text-only message
  */
 const sendMessage = async (clientId, phone, message) => {
   const wClient = activeClients.get(clientId);
@@ -380,7 +414,48 @@ const sendMessage = async (clientId, phone, message) => {
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const result = await wClient.sendMessage(chatId, message);
 
-  // Update message count
+  await WhatsAppClientModel.findOneAndUpdate(
+    { clientId },
+    { $inc: { messagesSent: 1 } }
+  );
+
+  return result;
+};
+
+/**
+ * Send an image message with optional caption.
+ * Falls back to sending caption as plain text if media fetch fails.
+ *
+ * @param {string} clientId  - internal client ID string
+ * @param {string} phone     - recipient phone number
+ * @param {string} imageUrl  - publicly reachable URL of the image
+ * @param {string} caption   - text shown below the image (supports template variables, already rendered)
+ */
+const sendImageMessage = async (clientId, phone, imageUrl, caption = '') => {
+  const wClient = activeClients.get(clientId);
+  if (!wClient) throw new Error(`No active client for ${clientId}`);
+
+  const dbClient = await WhatsAppClientModel.findOne({ clientId });
+  if (!dbClient || dbClient.status !== 'connected') {
+    throw new Error(`Client ${clientId} is not connected`);
+  }
+
+  const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
+
+  let result;
+  try {
+    const media = await fetchMediaFromUrl(imageUrl);
+    result = await wClient.sendMessage(chatId, media, {
+      caption: caption || undefined
+    });
+    console.log(`🖼️  Image sent to ${phone} (caption: ${caption ? 'yes' : 'no'})`);
+  } catch (mediaErr) {
+    // If media fetch/send fails, fall back to text-only so the contact isn't lost
+    console.error(`⚠️  Image send failed for ${phone}, falling back to text:`, mediaErr.message);
+    const fallbackText = caption || imageUrl;
+    result = await wClient.sendMessage(chatId, fallbackText);
+  }
+
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
     { $inc: { messagesSent: 1 } }
@@ -404,7 +479,6 @@ const initWhatsAppManager = async () => {
     for (const client of connectedClients) {
       try {
         await createWhatsAppClient(client.clientId);
-        // Small delay to avoid overwhelming the system
         await new Promise(r => setTimeout(r, 2000));
       } catch (err) {
         console.error(`Error restoring client ${client.clientId}:`, err);
@@ -428,6 +502,7 @@ module.exports = {
   getClient,
   destroyClient,
   sendMessage,
+  sendImageMessage,
   initWhatsAppManager,
   isClientConnected,
   activeClients
