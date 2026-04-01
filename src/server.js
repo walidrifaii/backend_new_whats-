@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const { testConnection } = require('./db/mysql');
+const User = require('./models/User');
 
 const authRoutes = require('./routes/auth');
 const clientRoutes = require('./routes/clients');
@@ -170,8 +171,12 @@ if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_NAME) {
 testConnection()
   .then(async (ok) => {
     if (!ok) throw new Error('MySQL ping failed');
+<<<<<<< HEAD
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
+=======
+    await User.ensureApiTokenColumns();
+>>>>>>> 4301074 ( upload image)
     console.log('✅ MySQL connected');
     initWhatsAppManager();
     server.listen(process.env.PORT || 5000, () => {

@@ -7,6 +7,7 @@ const { sendMessage } = require('../services/whatsappManager');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const authMiddleware = require('../middleware/auth');
 
+<<<<<<< HEAD
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
     `[BALANCE_EMAIL] context=${context} ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${email || 'n/a'}`
@@ -14,11 +15,33 @@ const logBalanceEmailResult = (context, result, email) => {
 };
 
 // POST /api/messages/send - Send a single message
+=======
+const generateOtpCode = (length = 6) => {
+  const safeLength = Number.isInteger(length) && length >= 4 && length <= 8 ? length : 6;
+  let code = '';
+  for (let i = 0; i < safeLength; i += 1) {
+    code += Math.floor(Math.random() * 10);
+  }
+  return code;
+};
+
+// POST /api/messages/send - Send a single message (optional image via public URL)
+>>>>>>> 4301074 ( upload image)
 router.post('/send', authMiddleware, async (req, res) => {
   try {
-    const { clientId, phone, message } = req.body;
-    if (!clientId || !phone || !message) {
-      return res.status(400).json({ error: 'clientId, phone, and message are required' });
+    const { clientId, phone, message, caption, imageUrl, mediaUrl } = req.body;
+    const textBody = String(message || '').trim();
+    const textCaption = String(caption || '').trim();
+    const img = String(imageUrl || mediaUrl || '').trim();
+    const combinedText = textCaption || textBody;
+
+    if (!clientId || !phone) {
+      return res.status(400).json({ error: 'clientId and phone are required' });
+    }
+    if (!combinedText && !img) {
+      return res.status(400).json({
+        error: 'Provide a message, caption, or image URL (or any combination)'
+      });
     }
 
     const balance = await User.getBalance(req.user._id);
@@ -47,7 +70,16 @@ router.post('/send', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }
 
-    const result = await sendMessage(dbClient.clientId, phone, message);
+    const result = await sendMessage(
+      dbClient.clientId,
+      phone,
+      combinedText,
+      img || null
+    );
+
+    const logText = img
+      ? `[image] ${combinedText || '(no caption)'}`.trim()
+      : combinedText;
 
     await User.decrementBalance(req.user._id, 1);
     const updatedBalance = await User.getBalance(req.user._id);
@@ -65,7 +97,7 @@ router.post('/send', authMiddleware, async (req, res) => {
       userId: req.user._id,
       clientId: dbClient._id,
       phone,
-      message,
+      message: logText,
       direction: 'outgoing',
       status: 'sent',
       whatsappMessageId: result?.id?._serialized
@@ -75,6 +107,56 @@ router.post('/send', authMiddleware, async (req, res) => {
       message: 'Message sent',
       messageId: result?.id?._serialized,
       remainingBalance: updatedBalance
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/messages/send-otp - Send OTP using user's default connected client
+router.post('/send-otp', authMiddleware, async (req, res) => {
+  try {
+    const { phone, otp, otpLength, appName, expiryMinutes } = req.body;
+    if (!phone) {
+      return res.status(400).json({ error: 'phone is required' });
+    }
+
+    const dbClient = await WhatsAppClientModel.findOne({
+      userId: req.user._id,
+      isActive: true,
+      status: 'connected'
+    });
+
+    if (!dbClient) {
+      return res.status(400).json({
+        error: 'No connected WhatsApp client found. Connect a number first.'
+      });
+    }
+
+    const otpCode = String(otp || generateOtpCode(Number(otpLength)));
+    const safeExpiryMinutes = Number.isFinite(Number(expiryMinutes))
+      ? Math.max(1, Math.min(60, Number(expiryMinutes)))
+      : 10;
+    const safeAppName = String(appName || 'Your App').trim() || 'Your App';
+    const otpMessage = `${safeAppName} OTP: ${otpCode}. Expires in ${safeExpiryMinutes} minutes.`;
+
+    const result = await sendMessage(dbClient.clientId, phone, otpMessage);
+
+    await MessageLog.create({
+      userId: req.user._id,
+      clientId: dbClient._id,
+      phone,
+      message: otpMessage,
+      direction: 'outgoing',
+      status: 'sent',
+      whatsappMessageId: result?.id?._serialized
+    });
+
+    res.json({
+      message: 'OTP sent',
+      otp: otpCode,
+      messageId: result?.id?._serialized,
+      clientId: dbClient._id
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

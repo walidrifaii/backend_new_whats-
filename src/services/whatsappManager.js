@@ -367,8 +367,9 @@ const destroyClient = async (clientId) => {
 
 /**
  * Send a message using an active client
+ * @param {string} mediaUrl - Optional public URL; sent as image/document with optional caption
  */
-const sendMessage = async (clientId, phone, message) => {
+const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
   const wClient = activeClients.get(clientId);
   if (!wClient) throw new Error(`No active client for ${clientId}`);
 
@@ -378,7 +379,32 @@ const sendMessage = async (clientId, phone, message) => {
   }
 
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-  const result = await wClient.sendMessage(chatId, message);
+  const caption = typeof message === 'string' ? message : '';
+
+  let result;
+  const trimmedUrl = typeof mediaUrl === 'string' ? mediaUrl.trim() : '';
+
+  if (trimmedUrl) {
+    const { MessageMedia } = require('whatsapp-web.js');
+    let media;
+    try {
+      media = await MessageMedia.fromUrl(trimmedUrl, { unsafeMime: true });
+    } catch (firstErr) {
+      // Some hosts block Node fetch; retry via the connected browser context
+      try {
+        media = await MessageMedia.fromUrl(trimmedUrl, {
+          unsafeMime: true,
+          client: wClient
+        });
+      } catch (secondErr) {
+        const reason = secondErr?.message || firstErr?.message || 'unknown';
+        throw new Error(`Failed to load media from URL: ${reason}`);
+      }
+    }
+    result = await wClient.sendMessage(chatId, media, { caption: caption || undefined });
+  } else {
+    result = await wClient.sendMessage(chatId, message);
+  }
 
   // Update message count
   await WhatsAppClientModel.findOneAndUpdate(

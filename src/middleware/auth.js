@@ -36,6 +36,11 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ error: 'Session revoked. Please login again.' });
     }
 
+    // If API token is rotated, old tokens are rejected.
+    if (decoded.tokenType === 'api' && user.apiToken && user.apiToken !== token) {
+      return res.status(401).json({ error: 'API token is no longer valid' });
+    }
+
     delete user.password;
     delete user.authToken;
     user.isAdmin = false;

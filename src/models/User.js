@@ -10,6 +10,8 @@ const mapRowToUser = (row) => {
     name: row.name,
     email: row.email,
     password: row.password,
+    apiToken: row.api_token || null,
+    apiTokenCreatedAt: row.api_token_created_at || null,
     role: row.role,
     isActive: !!row.is_active,
     authToken: row.api_token || row.auth_token || null,
@@ -21,7 +23,12 @@ const mapRowToUser = (row) => {
     toJSON() {
       const safe = { ...this };
       delete safe.password;
+<<<<<<< HEAD
       delete safe.authToken;
+=======
+      delete safe.apiToken;
+      delete safe.apiTokenCreatedAt;
+>>>>>>> 4301074 ( upload image)
       delete safe.comparePassword;
       delete safe.toJSON;
       return safe;
@@ -78,7 +85,14 @@ class UserModel {
     }
 
     const rows = await query(
+<<<<<<< HEAD
       `SELECT ${this.COLUMNS} FROM users WHERE ${clauses.join(' AND ')} LIMIT 1`,
+=======
+      `SELECT id, name, email, password, api_token, api_token_created_at, role, is_active, created_at
+       FROM users
+       WHERE ${clauses.join(' AND ')}
+       LIMIT 1`,
+>>>>>>> 4301074 ( upload image)
       values
     );
     return mapRowToUser(rows[0]);
@@ -86,7 +100,14 @@ class UserModel {
 
   static async findById(id) {
     const rows = await query(
+<<<<<<< HEAD
       `SELECT ${this.COLUMNS} FROM users WHERE id = ? LIMIT 1`,
+=======
+      `SELECT id, name, email, password, api_token, api_token_created_at, role, is_active, created_at
+       FROM users
+       WHERE id = ?
+       LIMIT 1`,
+>>>>>>> 4301074 ( upload image)
       [id]
     );
     return mapRowToUser(rows[0]);
@@ -109,14 +130,21 @@ class UserModel {
     const messageBalance = parseInt(data.messageBalance) || 0;
 
     await query(
+<<<<<<< HEAD
       `INSERT INTO users (id, name, email, password, role, is_active, message_balance, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
       [id, name, email, hashedPassword, role, isActive ? 1 : 0, messageBalance]
+=======
+      `INSERT INTO users (id, name, email, password, api_token, api_token_created_at, role, is_active, created_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, NOW())`,
+      [id, name, email, hashedPassword, role, isActive ? 1 : 0]
+>>>>>>> 4301074 ( upload image)
     );
 
     return this.findById(id);
   }
 
+<<<<<<< HEAD
   static async updateBalance(userId, newBalance) {
     await query(
       `UPDATE users SET message_balance = ? WHERE id = ?`,
@@ -157,6 +185,35 @@ class UserModel {
        WHERE id = ?`,
       [String(userId)]
     );
+=======
+  static async updateApiToken(userId, apiToken) {
+    await query(
+      `UPDATE users
+       SET api_token = ?, api_token_created_at = NOW()
+       WHERE id = ?
+       LIMIT 1`,
+      [String(apiToken || ''), String(userId)]
+    );
+  }
+
+  static async ensureApiTokenColumns() {
+    const rows = await query(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'users'
+         AND COLUMN_NAME IN ('api_token', 'api_token_created_at')`
+    );
+
+    const existing = new Set(rows.map((r) => String(r.COLUMN_NAME || '')));
+
+    if (!existing.has('api_token')) {
+      await query('ALTER TABLE users ADD COLUMN api_token TEXT NULL');
+    }
+    if (!existing.has('api_token_created_at')) {
+      await query('ALTER TABLE users ADD COLUMN api_token_created_at DATETIME NULL');
+    }
+>>>>>>> 4301074 ( upload image)
   }
 }
 

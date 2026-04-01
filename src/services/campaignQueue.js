@@ -132,14 +132,23 @@ const processCampaign = async (campaignId) => {
         phone: contact.phone,
         ...((contact.variables && typeof contact.variables === 'object') ? contact.variables : {})
       };
-      const renderedMessage = renderTemplate(campaign.message, variables);
+      const renderedMessage = renderTemplate(
+        current.message || '',
+        variables
+      );
+      const mediaUrl = (current.mediaUrl && String(current.mediaUrl).trim()) || null;
 
       let success = false;
       let error = null;
       let whatsappId = null;
 
       try {
-        const result = await sendMessage(clientId, phone, renderedMessage);
+        const result = await sendMessage(
+          clientId,
+          phone,
+          renderedMessage,
+          mediaUrl
+        );
         whatsappId = result?.id?._serialized || null;
         success = true;
         console.log(`✅ Sent to ${phone} for campaign ${campaignId}`);

@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
+const { issueApiToken, issueDashboardToken } = require('../utils/tokens');
 
 const getTokenExpiryDate = (token) => {
   const decoded = jwt.decode(token);
@@ -28,6 +28,7 @@ router.post('/register', [
     if (existing) return res.status(400).json({ error: 'Email already registered' });
 
     const user = await User.create({ name, email, password });
+<<<<<<< HEAD
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     await User.saveToken(user._id, token);
     await TokenSession.createOrUpdate({
@@ -37,6 +38,12 @@ router.post('/register', [
       expiresAt: getTokenExpiryDate(token)
     });
     res.status(201).json({ token, user });
+=======
+    const token = issueDashboardToken(user._id);
+    const apiToken = issueApiToken(user._id);
+    await User.updateApiToken(user._id, apiToken);
+    res.status(201).json({ token, apiToken, user });
+>>>>>>> 4301074 ( upload image)
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -59,6 +66,7 @@ router.post('/login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
+<<<<<<< HEAD
     const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET, { expiresIn: '7d' });
     await User.saveToken(user._id, token);
     await TokenSession.createOrUpdate({
@@ -68,6 +76,15 @@ router.post('/login', [
       expiresAt: getTokenExpiryDate(token)
     });
     return res.json({ token, user });
+=======
+    const token = issueDashboardToken(user._id);
+    let apiToken = user.apiToken;
+    if (!apiToken) {
+      apiToken = issueApiToken(user._id);
+      await User.updateApiToken(user._id, apiToken);
+    }
+    res.json({ token, apiToken, user });
+>>>>>>> 4301074 ( upload image)
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -115,6 +132,7 @@ router.get('/me', authMiddleware, async (req, res) => {
   res.json({ user: req.user });
 });
 
+<<<<<<< HEAD
 // POST /api/auth/logout
 router.post('/logout', authMiddleware, async (req, res) => {
   try {
@@ -127,6 +145,19 @@ router.post('/logout', authMiddleware, async (req, res) => {
     return res.json({ message: 'Logged out successfully' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+=======
+// POST /api/auth/api-token - create/recreate API token for external websites
+router.post('/api-token', authMiddleware, async (req, res) => {
+  try {
+    const apiToken = issueApiToken(req.user._id);
+    await User.updateApiToken(req.user._id, apiToken);
+    res.json({
+      apiToken,
+      expiresIn: process.env.API_TOKEN_EXPIRES_IN || '365d'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+>>>>>>> 4301074 ( upload image)
   }
 });
 
