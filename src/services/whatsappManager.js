@@ -1,11 +1,4 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const wwebjsVersion = (() => {
-  try {
-    return require('whatsapp-web.js/package.json').version;
-  } catch (_) {
-    return 'unknown';
-  }
-})();
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -119,22 +112,6 @@ const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries })
 };
 
 /**
- * Ephemeral servers often have no usable LocalWebCache; remote HTML matches the library's pinned webVersion.
- * Set WA_WEB_VERSION_CACHE=local to force disk-only cache.
- */
-const getWebVersionCacheOptions = () => {
-  if (process.env.WA_WEB_VERSION_CACHE === 'local') {
-    return { type: 'local' };
-  }
-  return {
-    type: 'remote',
-    remotePath:
-      process.env.WA_WEB_VERSION_REMOTE_PATH ||
-      'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html'
-  };
-};
-
-/**
  * Creates and initializes a WhatsApp client for a given clientId
  */
 const createWhatsAppClient = async (clientId, options = {}) => {
@@ -146,7 +123,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     return activeClients.get(clientId);
   }
 
-  console.log(`Initializing WhatsApp client: ${clientId} (whatsapp-web.js ${wwebjsVersion})`);
+  console.log(`Initializing WhatsApp client: ${clientId}`);
 
   if (forceReauth && attempt === 1) {
     console.log(`Clearing stale session data for ${clientId}`);
@@ -186,7 +163,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
       dataPath: SESSIONS_DIR
     }),
     puppeteer: puppeteerConfig,
-    webVersionCache: getWebVersionCacheOptions(),
     takeoverOnConflict: true,
     takeoverTimeoutMs: 0
   });
@@ -390,8 +366,44 @@ const destroyClient = async (clientId) => {
 };
 
 /**
- * Send a message using an active client
- * @param {string} mediaUrl - Optional public URL; sent as image/document with optional caption
+ * Fetch a remote URL and return a whatsapp-web.js MessageMedia object.
+ * Uses node's https/http to download the raw buffer — more reliable than
+ * MessageMedia.fromUrl() which breaks on some CDN responses.
+ */
+const fetchMediaFromUrl = (url) => {
+  return new Promise((resolve, reject) => {
+    const { MessageMedia } = require('whatsapp-web.js');
+    const httpModule = url.startsWith('https') ? require('https') : require('http');
+
+    httpModule.get(url, { timeout: 15000 }, (res) => {
+      // Follow one redirect level (e.g. R2/S3 pre-signed URLs)
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        return fetchMediaFromUrl(res.headers.location).then(resolve).catch(reject);
+      }
+
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Media fetch failed with HTTP ${res.statusCode}: ${url}`));
+      }
+
+      const contentType = res.headers['content-type'] || 'image/jpeg';
+      const mimeType = contentType.split(';')[0].trim();
+
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const data = Buffer.concat(chunks).toString('base64');
+        // Derive a simple filename from the URL path
+        const filename = url.split('/').pop().split('?')[0] || 'media';
+        resolve(new MessageMedia(mimeType, data, filename));
+      });
+      res.on('error', reject);
+    }).on('error', reject).on('timeout', () => reject(new Error('Media fetch timed out')));
+  });
+};
+
+/**
+ * Send a message using an active client.
+ * Pass mediaUrl to send an image/video/document with an optional caption.
  */
 const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
   const wClient = activeClients.get(clientId);
@@ -403,70 +415,23 @@ const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
   }
 
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-  const caption = typeof message === 'string' ? message : '';
-
-  const digitsOnly = chatId.replace(/@c\.us$/i, '').replace(/\D/g, '');
-  let registered;
-  // test comment
-  try {
-    registered = await wClient.getNumberId(digitsOnly);
-  } catch (e) {
-    const inner = e?.message || String(e);
-    throw new Error(
-      `getNumberId failed (${inner}). Rebuild the server image with whatsapp-web.js >= 1.34 and redeploy, or re-scan QR after deploy.`
-    );
-  }
-  if (!registered) {
-    throw new Error('This phone number is not registered on WhatsApp');
-  }
-  const targetChatId = registered._serialized || chatId;
-
-  // Cold outreach: sendSeen can fail before a thread exists. Link preview runs extra page work and can throw opaque errors.
-  const sendOpts = {
-    sendSeen: false,
-    ...(process.env.WA_LINK_PREVIEW === '1' ? {} : { linkPreview: false })
-  };
 
   let result;
-  const trimmedUrl = typeof mediaUrl === 'string' ? mediaUrl.trim() : '';
 
-  try {
-    if (trimmedUrl) {
-      const { MessageMedia } = require('whatsapp-web.js');
-      let media;
-      try {
-        media = await MessageMedia.fromUrl(trimmedUrl, { unsafeMime: true });
-      } catch (firstErr) {
-        try {
-          media = await MessageMedia.fromUrl(trimmedUrl, {
-            unsafeMime: true,
-            client: wClient
-          });
-        } catch (secondErr) {
-          const reason = secondErr?.message || firstErr?.message || 'unknown';
-          throw new Error(`Failed to load media from URL: ${reason}`);
-        }
-      }
-      result = await wClient.sendMessage(targetChatId, media, {
-        ...sendOpts,
-        caption: caption || undefined
+  if (mediaUrl) {
+    try {
+      const media = await fetchMediaFromUrl(mediaUrl);
+      // caption is the rendered message text shown below the image
+      result = await wClient.sendMessage(chatId, media, {
+        caption: message || ''
       });
-    } else {
-      const text = typeof message === 'string' ? message : '';
-      if (!text.trim()) {
-        throw new Error('Cannot send an empty text message');
-      }
-      result = await wClient.sendMessage(targetChatId, text, sendOpts);
+    } catch (mediaErr) {
+      console.error(`Media send failed for ${phone}, falling back to text:`, mediaErr.message);
+      // Fallback: send text-only so the contact isn't skipped entirely
+      result = await wClient.sendMessage(chatId, message);
     }
-  } catch (e) {
-    const inner = e?.message || String(e);
-    throw new Error(
-      `sendMessage failed (${inner}). If the library is old, upgrade whatsapp-web.js and redeploy; try WA_LINK_PREVIEW=0 (default here unless WA_LINK_PREVIEW=1).`
-    );
-  }
-
-  if (!result) {
-    throw new Error('WhatsApp accepted no message (no chat). Try again or check the number.');
+  } else {
+    result = await wClient.sendMessage(chatId, message);
   }
 
   // Update message count
