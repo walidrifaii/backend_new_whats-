@@ -407,6 +407,7 @@ const sendMessage = async (clientId, phone, message, mediaUrl = null) => {
 
   const digitsOnly = chatId.replace(/@c\.us$/i, '').replace(/\D/g, '');
   let registered;
+  // test comment
   try {
     registered = await wClient.getNumberId(digitsOnly);
   } catch (e) {
