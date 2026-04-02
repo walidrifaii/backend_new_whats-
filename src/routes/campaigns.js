@@ -38,7 +38,7 @@ router.post('/', authMiddleware, [
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const { name, message, clientId, minDelay, maxDelay } = req.body;
+    const { name, message, clientId, minDelay, maxDelay, mediaUrl, mediaType } = req.body;
 
     const client = await WhatsAppClientModel.findOne({
       _id: clientId,
@@ -52,6 +52,8 @@ router.post('/', authMiddleware, [
       clientId,
       name,
       message,
+      mediaUrl: mediaUrl && String(mediaUrl).trim() ? String(mediaUrl).trim() : null,
+      mediaType: mediaType && String(mediaType).trim() ? String(mediaType).trim() : null,
       minDelay: minDelay || 20000,
       maxDelay: maxDelay || 30000,
       status: 'draft'

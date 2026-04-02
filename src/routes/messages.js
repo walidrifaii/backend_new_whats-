@@ -16,9 +16,11 @@ const logBalanceEmailResult = (context, result, email) => {
 // POST /api/messages/send - Send a single message
 router.post('/send', authMiddleware, async (req, res) => {
   try {
-    const { clientId, phone, message } = req.body;
-    if (!clientId || !phone || !message) {
-      return res.status(400).json({ error: 'clientId, phone, and message are required' });
+    const { clientId, phone, message, mediaUrl } = req.body;
+    if (!clientId || !phone || (!message && !mediaUrl)) {
+      return res.status(400).json({
+        error: 'clientId and phone are required; provide message and/or mediaUrl'
+      });
     }
 
     const balance = await User.getBalance(req.user._id);
@@ -47,7 +49,13 @@ router.post('/send', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }
 
-    const result = await sendMessage(dbClient.clientId, phone, message);
+    const sendOpts = mediaUrl && String(mediaUrl).trim() ? { mediaUrl: String(mediaUrl).trim() } : null;
+    const result = await sendMessage(
+      dbClient.clientId,
+      phone,
+      message != null ? String(message) : '',
+      sendOpts
+    );
 
     await User.decrementBalance(req.user._id, 1);
     const updatedBalance = await User.getBalance(req.user._id);
@@ -61,11 +69,14 @@ router.post('/send', authMiddleware, async (req, res) => {
         .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, req.user.email));
     }
 
+    const logText =
+      [message, mediaUrl && `(media: ${mediaUrl})`].filter(Boolean).join(' ') || '(media only)';
+
     await MessageLog.create({
       userId: req.user._id,
       clientId: dbClient._id,
       phone,
-      message,
+      message: logText,
       direction: 'outgoing',
       status: 'sent',
       whatsappMessageId: result?.id?._serialized

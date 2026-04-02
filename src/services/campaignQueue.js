@@ -139,7 +139,11 @@ const processCampaign = async (campaignId) => {
       let whatsappId = null;
 
       try {
-        const result = await sendMessage(clientId, phone, renderedMessage);
+        const sendOpts =
+          campaign.mediaUrl && String(campaign.mediaUrl).trim()
+            ? { mediaUrl: campaign.mediaUrl, mediaType: campaign.mediaType || null }
+            : null;
+        const result = await sendMessage(clientId, phone, renderedMessage, sendOpts);
         whatsappId = result?.id?._serialized || null;
         success = true;
         console.log(`✅ Sent to ${phone} for campaign ${campaignId}`);
