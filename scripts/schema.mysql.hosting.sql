@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   client_id CHAR(24) NOT NULL,
   name VARCHAR(200) NOT NULL,
   message TEXT NOT NULL,
-  media_url VARCHAR(1000) NULL,
+  media_url VARCHAR(2048) NULL,
   media_type ENUM('image', 'video', 'document') NULL,
   status ENUM('draft', 'running', 'paused', 'completed', 'failed')
     NOT NULL DEFAULT 'draft',

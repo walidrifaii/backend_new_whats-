@@ -6,6 +6,7 @@ const os = require('os');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
+const { sanitizeMediaUrl } = require('../utils/campaignMedia');
 
 // In-memory map of active WhatsApp client instances
 const activeClients = new Map();
@@ -39,7 +40,8 @@ const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
  */
 const loadMessageMedia = async (mediaUrl) => {
   if (!mediaUrl || !String(mediaUrl).trim()) return null;
-  const trimmed = String(mediaUrl).trim();
+  const trimmed = sanitizeMediaUrl(String(mediaUrl).trim());
+  if (!trimmed) return null;
 
   if (/^https?:\/\//i.test(trimmed)) {
     return MessageMedia.fromUrl(trimmed, { unsafeMime: true });
