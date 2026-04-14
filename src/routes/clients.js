@@ -67,7 +67,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     }
 
     const shouldForceReauth =
-      req.query.reset === '1' || req.body?.forceReauth === true;
+      req.query.reset === '1' || req.body?.forceReauth === false;
 
     if (isClientConnected(client.clientId) && !shouldForceReauth) {
       return res.json({
@@ -100,7 +100,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       }
 
       try {
-        await createWhatsAppClient(client.clientId, { forceReauth: shouldForceReauth });
+      await   createWhatsAppClient(client.clientId);
       } catch (err) {
         console.error(`Init error for ${client.clientId}:`, err);
       }

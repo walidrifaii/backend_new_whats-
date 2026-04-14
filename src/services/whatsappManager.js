@@ -125,14 +125,14 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
   console.log(`Initializing WhatsApp client: ${clientId}`);
 
-  if (forceReauth && attempt === 1) {
-    console.log(`Clearing stale session data for ${clientId}`);
-    clearClientSessionData(clientId);
-    await WhatsAppClientModel.findOneAndUpdate(
-      { clientId },
-      { status: 'disconnected', qrCode: null, phone: '' }
-    );
-  }
+  // if (forceReauth && attempt === 1) {
+  //   console.log(`Clearing stale session data for ${clientId}`);
+  //   clearClientSessionData(clientId);
+  //   await WhatsAppClientModel.findOneAndUpdate(
+  //     { clientId },
+  //     { status: 'disconnected', qrCode: null, phone: '' }
+  //   );
+  // }
 
   const chromeExecutablePath =
     process.env.PUPPETEER_EXECUTABLE_PATH ||
