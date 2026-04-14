@@ -1,4 +1,4 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -6,7 +6,6 @@ const os = require('os');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
-const { sanitizeMediaUrl } = require('../utils/campaignMedia');
 
 // In-memory map of active WhatsApp client instances
 const activeClients = new Map();
@@ -22,49 +21,16 @@ const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 
 const getDefaultSessionsDir = () => {
-  // إذا في production وعندنا SESSIONS_DIR، استخدمه
-  // وإذا ما في SESSIONS_DIR، استخدم sessions بجانب التطبيق
+  // On cloud hosts, app directory may be ephemeral/restricted.
+  if (process.env.NODE_ENV === 'production') {
+    return path.join(os.tmpdir(), 'wwebjs-sessions');
+  }
   return path.resolve(__dirname, '../../sessions');
 };
 
 const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)
   : getDefaultSessionsDir();
-const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
-
-/**
- * Build MessageMedia from a stored URL or local uploads path.
- */
-const loadMessageMedia = async (mediaUrl) => {
-  if (!mediaUrl || !String(mediaUrl).trim()) return null;
-  const trimmed = sanitizeMediaUrl(String(mediaUrl).trim());
-  if (!trimmed) return null;
-
-  if (/^https?:\/\//i.test(trimmed)) {
-    return MessageMedia.fromUrl(trimmed, { unsafeMime: true });
-  }
-
-  let relative = trimmed;
-  if (relative.startsWith('/uploads/')) {
-    relative = relative.slice('/uploads/'.length);
-  } else if (/^uploads[/\\]/i.test(relative)) {
-    relative = relative.replace(/^uploads[/\\]/i, '');
-  } else {
-    const base = (process.env.PUBLIC_BASE_URL || process.env.API_PUBLIC_URL || '').replace(/\/$/, '');
-    if (base && trimmed.startsWith('/')) {
-      return MessageMedia.fromUrl(`${base}${trimmed}`, { unsafeMime: true });
-    }
-    return null;
-  }
-
-  const resolved = path.normalize(path.join(UPLOADS_DIR, relative));
-  const uploadsNorm = path.normalize(UPLOADS_DIR);
-  const rel = path.relative(uploadsNorm, resolved);
-  if (rel.startsWith('..') || path.isAbsolute(rel) || !fs.existsSync(resolved)) {
-    throw new Error(`Media file not found or invalid path: ${trimmed}`);
-  }
-  return MessageMedia.fromFilePath(resolved);
-};
 
 // Ensure sessions directory exists
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -400,13 +366,9 @@ const destroyClient = async (clientId) => {
 };
 
 /**
- * Send a text message, or text + optional media (image/video/document) when mediaUrl is set.
- * @param {string} clientId
- * @param {string} phone
- * @param {string} message - used as body, or as WhatsApp caption when media is sent
- * @param {{ mediaUrl?: string|null, mediaType?: string|null }} [options]
+ * Send a message using an active client
  */
-const sendMessage = async (clientId, phone, message, options = null) => {
+const sendMessage = async (clientId, phone, message) => {
   const wClient = activeClients.get(clientId);
   if (!wClient) throw new Error(`No active client for ${clientId}`);
 
@@ -416,20 +378,7 @@ const sendMessage = async (clientId, phone, message, options = null) => {
   }
 
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-  const text = message != null ? String(message) : '';
-  const mediaUrl = options && options.mediaUrl ? String(options.mediaUrl).trim() : '';
-
-  let result;
-  if (mediaUrl) {
-    const media = await loadMessageMedia(mediaUrl);
-    if (!media) {
-      throw new Error(`Could not load media from: ${mediaUrl}`);
-    }
-    const caption = text.trim() !== '' ? text : undefined;
-    result = await wClient.sendMessage(chatId, media, caption ? { caption } : undefined);
-  } else {
-    result = await wClient.sendMessage(chatId, text);
-  }
+  const result = await wClient.sendMessage(chatId, message);
 
   // Update message count
   await WhatsAppClientModel.findOneAndUpdate(
