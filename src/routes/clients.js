@@ -67,7 +67,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     }
 
     const shouldForceReauth =
-      req.query.reset === '1' || req.body?.forceReauth === false;
+      req.query.reset === '1' || req.body?.forceReauth === true;
 
     if (isClientConnected(client.clientId) && !shouldForceReauth) {
       return res.json({
