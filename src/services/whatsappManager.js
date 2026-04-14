@@ -22,17 +22,14 @@ const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 
 const getDefaultSessionsDir = () => {
-  // On cloud hosts, app directory may be ephemeral/restricted.
-  if (process.env.NODE_ENV === 'production') {
-    return path.join(os.tmpdir(), 'wwebjs-sessions');
-  }
+  // إذا في production وعندنا SESSIONS_DIR، استخدمه
+  // وإذا ما في SESSIONS_DIR، استخدم sessions بجانب التطبيق
   return path.resolve(__dirname, '../../sessions');
 };
 
 const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)
   : getDefaultSessionsDir();
-
 const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
 
 /**
