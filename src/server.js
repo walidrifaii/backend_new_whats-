@@ -19,6 +19,7 @@ const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
 const { initWhatsAppManager } = require('./services/whatsappManager');
+const { prepareCampaignsForShutdown, resumeCampaignsAfterBoot } = require('./services/campaignQueue');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -31,6 +32,7 @@ process.on('uncaughtException', (error) => {
 
 const app = express();
 const server = http.createServer(app);
+let isShuttingDown = false;
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
@@ -173,7 +175,33 @@ testConnection()
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     console.log('✅ MySQL connected');
-    initWhatsAppManager();
+    initWhatsAppManager().catch((err) => {
+      console.error('initWhatsAppManager startup error:', err);
+    });
+
+    const campaignResumeDelayMs = Math.max(
+      0,
+      parseInt(
+        process.env.WA_BOOT_CAMPAIGN_RESUME_DELAY_MS ||
+        process.env.WA_BOOT_RESTORE_DELAY_MS ||
+        '0',
+        10
+      ) || 0
+    );
+    if (campaignResumeDelayMs > 0) {
+      console.log(`⏳ Delaying campaign auto-resume by ${campaignResumeDelayMs}ms`);
+    }
+    setTimeout(async () => {
+      try {
+        const { resumedCount, deferredCount } = await resumeCampaignsAfterBoot();
+        if (resumedCount > 0 || deferredCount > 0) {
+          console.log(`♻️ Campaign recovery: resumed=${resumedCount}, deferred=${deferredCount}`);
+        }
+      } catch (err) {
+        console.error('Campaign auto-resume error:', err);
+      }
+    }, campaignResumeDelayMs);
+
     server.listen(process.env.PORT || 5000, () => {
       console.log(`🚀 Server running on port ${process.env.PORT || 5000}`);
     });
@@ -184,3 +212,34 @@ testConnection()
   });
 
 module.exports = { app, io };
+
+const gracefulShutdown = async (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`🛑 Received ${signal}. Preparing graceful shutdown...`);
+
+  try {
+    await prepareCampaignsForShutdown();
+  } catch (err) {
+    console.error('Error while preparing campaigns for shutdown:', err);
+  }
+
+  try {
+    server.close(() => {
+      process.exit(0);
+    });
+  } catch (_) {
+    process.exit(0);
+  }
+
+  // Hard fallback in case close hangs.
+  setTimeout(() => process.exit(0), 10000).unref();
+};
+
+process.on('SIGTERM', () => {
+  gracefulShutdown('SIGTERM');
+});
+
+process.on('SIGINT', () => {
+  gracefulShutdown('SIGINT');
+});

@@ -1,4 +1,6 @@
 const Bull = require('bull');
+const fs = require('fs');
+const path = require('path');
 const Campaign = require('../models/Campaign');
 const Contact = require('../models/Contact');
 const MessageLog = require('../models/MessageLog');
@@ -48,6 +50,52 @@ const failPendingContacts = async (campaignId, reason) => {
 const campaignQueues = new Map();
 // Map of paused campaign flags
 const pausedCampaigns = new Set();
+
+const getRecoveryFilePath = () => {
+  const configured = process.env.CAMPAIGN_RECOVERY_FILE;
+  if (configured && String(configured).trim()) {
+    return path.resolve(String(configured).trim());
+  }
+  return path.resolve(__dirname, '../../sessions/.campaign-recovery.json');
+};
+
+const readRecoveryCampaignIds = () => {
+  const filePath = getRecoveryFilePath();
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!Array.isArray(parsed?.campaignIds)) return [];
+    return parsed.campaignIds.map((id) => String(id)).filter(Boolean);
+  } catch (err) {
+    console.warn(`Failed reading campaign recovery file (${filePath}):`, err.message);
+    return [];
+  }
+};
+
+const writeRecoveryCampaignIds = (campaignIds) => {
+  const filePath = getRecoveryFilePath();
+  const parentDir = path.dirname(filePath);
+  if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+  const uniqueIds = [...new Set(campaignIds.map((id) => String(id)).filter(Boolean))];
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify(
+      { campaignIds: uniqueIds, updatedAt: new Date().toISOString() },
+      null,
+      2
+    ),
+    'utf8'
+  );
+};
+
+const removeRecoveryFile = () => {
+  const filePath = getRecoveryFilePath();
+  try {
+    if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
+  } catch (err) {
+    console.warn(`Failed removing campaign recovery file (${filePath}):`, err.message);
+  }
+};
 
 /**
  * Process a single campaign: iterate through pending contacts,
@@ -276,9 +324,85 @@ const isCampaignRunning = (campaignId) => {
   return campaignQueues.has(campaignId.toString());
 };
 
+const prepareCampaignsForShutdown = async () => {
+  const running = await Campaign.find({ status: 'running' });
+  if (running.length === 0) {
+    removeRecoveryFile();
+    return { pausedCount: 0 };
+  }
+
+  const pausedIds = [];
+  for (const campaign of running) {
+    try {
+      await Campaign.findByIdAndUpdate(campaign._id, { status: 'paused' });
+      campaignQueues.delete(String(campaign._id));
+      pausedIds.push(String(campaign._id));
+    } catch (err) {
+      console.warn(`Failed pausing campaign ${campaign._id} during shutdown:`, err.message);
+    }
+  }
+
+  if (pausedIds.length > 0) {
+    writeRecoveryCampaignIds(pausedIds);
+    console.log(`⏸️ Paused ${pausedIds.length} running campaign(s) for safe shutdown.`);
+  }
+
+  return { pausedCount: pausedIds.length };
+};
+
+const resumeCampaignsAfterBoot = async () => {
+  const storedIds = readRecoveryCampaignIds();
+  const stillRunningRows = await Campaign.find({ status: 'running' });
+  const candidateIds = [...new Set([
+    ...storedIds,
+    ...stillRunningRows.map((c) => String(c._id))
+  ])];
+
+  if (candidateIds.length === 0) {
+    return { resumedCount: 0, deferredCount: 0 };
+  }
+
+  let resumedCount = 0;
+  const deferred = [];
+
+  for (const campaignId of candidateIds) {
+    try {
+      const campaign = await Campaign.findById(campaignId);
+      if (!campaign) continue;
+
+      const isRecoverableStatus = campaign.status === 'paused' || campaign.status === 'running';
+      const hasPending = Number(campaign.pendingCount || 0) > 0;
+      if (!isRecoverableStatus || !hasPending) continue;
+
+      const dbClient = await WhatsAppClientModel.findOne({ _id: campaign.clientId, isActive: true });
+      if (!dbClient || dbClient.status !== 'connected') {
+        deferred.push(campaignId);
+        continue;
+      }
+
+      await startCampaign(campaignId);
+      resumedCount += 1;
+    } catch (err) {
+      console.warn(`Failed auto-resuming campaign ${campaignId}:`, err.message);
+      deferred.push(campaignId);
+    }
+  }
+
+  if (deferred.length > 0) {
+    writeRecoveryCampaignIds(deferred);
+    console.log(`⏳ Deferred ${deferred.length} campaign(s); will retry on next boot.`);
+  } else {
+    removeRecoveryFile();
+  }
+
+  return { resumedCount, deferredCount: deferred.length };
+};
+
 module.exports = {
   startCampaign,
   pauseCampaign,
   resumeCampaign,
-  isCampaignRunning
+  isCampaignRunning,
+  prepareCampaignsForShutdown,
+  resumeCampaignsAfterBoot
 };
