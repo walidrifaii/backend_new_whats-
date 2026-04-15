@@ -435,6 +435,28 @@ const destroyClient = async (clientId) => {
 };
 
 /**
+ * Gracefully destroy all active clients (used on process shutdown)
+ * so Chromium profile locks are released before container exit.
+ */
+const destroyAllClientsGracefully = async () => {
+  const clientIds = Array.from(activeClients.keys());
+  if (clientIds.length === 0) return;
+
+  console.log(`🧹 Destroying ${clientIds.length} active WhatsApp client(s) before shutdown...`);
+  for (const clientId of clientIds) {
+    const wClient = activeClients.get(clientId);
+    if (!wClient) continue;
+    try {
+      await wClient.destroy();
+    } catch (err) {
+      console.error(`Error destroying client ${clientId} during shutdown:`, err.message);
+    }
+    activeClients.delete(clientId);
+    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
+  }
+};
+
+/**
  * Send a message using an active client
  */
 const sendMessage = async (clientId, phone, message) => {
@@ -502,6 +524,7 @@ module.exports = {
   createWhatsAppClient,
   getClient,
   destroyClient,
+  destroyAllClientsGracefully,
   sendMessage,
   initWhatsAppManager,
   isClientConnected,

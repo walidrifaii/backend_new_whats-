@@ -18,7 +18,7 @@ const User = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
-const { initWhatsAppManager } = require('./services/whatsappManager');
+const { initWhatsAppManager, destroyAllClientsGracefully } = require('./services/whatsappManager');
 const { prepareCampaignsForShutdown, resumeCampaignsAfterBoot } = require('./services/campaignQueue');
 const { setSocketIO } = require('./utils/socket');
 
@@ -223,6 +223,15 @@ const gracefulShutdown = async (signal) => {
   } catch (err) {
     console.error('Error while preparing campaigns for shutdown:', err);
   }
+
+  try {
+    await destroyAllClientsGracefully();
+  } catch (err) {
+    console.error('Error while destroying WhatsApp clients for shutdown:', err);
+  }
+
+  // Give Chromium a short moment to release profile locks.
+  await new Promise((r) => setTimeout(r, 1000));
 
   try {
     server.close(() => {
