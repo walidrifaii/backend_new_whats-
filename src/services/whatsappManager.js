@@ -72,6 +72,24 @@ const clearClientSessionData = (clientId) => {
   removePathIfExists(path.join(SESSIONS_DIR, clientId));
 };
 
+/** LocalAuth userDataDir (see whatsapp-web.js LocalAuth). */
+const getLocalAuthSessionRoot = (clientId) =>
+  path.join(SESSIONS_DIR, `session-${clientId}`);
+
+/**
+ * After a container redeploy, Chromium lock files still reference the old hostname/PID.
+ * Removing them is safe when no other live process uses this profile (single replica).
+ */
+const clearStaleChromiumSingletonArtifacts = (userDataDir) => {
+  const names = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+  const dirs = [userDataDir, path.join(userDataDir, 'Default')];
+  for (const dir of dirs) {
+    for (const name of names) {
+      removePathIfExists(path.join(dir, name));
+    }
+  }
+};
+
 const getRetryDelayMs = (attempt) => {
   const baseDelay = getInitRetryBaseDelayMs();
   const maxDelay = getInitRetryMaxDelayMs();
@@ -88,7 +106,9 @@ const isRetryableInitError = (err) => {
     msg.includes('target closed') ||
     msg.includes('navigation') ||
     msg.includes('browser') ||
-    msg.includes('websocket')
+    msg.includes('websocket') ||
+    msg.includes('singleton') ||
+    msg.includes('profile appears to be in use')
   );
 };
 
@@ -144,7 +164,9 @@ const createWhatsAppClient = async (clientId, options = {}) => {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
+      // Persisted profile on a new container: old SingletonLock references previous hostname.
+      '--disable-process-singleton-check'
     ]
   };
 
@@ -327,6 +349,8 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     { clientId },
     { status: 'initializing' }
   );
+
+  clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
 
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
