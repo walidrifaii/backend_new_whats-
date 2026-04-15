@@ -9,6 +9,28 @@ const { emitToClient } = require('../utils/socket');
 // In-memory map of active WhatsApp client instances
 const activeClients = new Map();
 
+// Ensures only one createWhatsAppClient runs per clientId until activeClients is populated
+// (otherwise two Chromium instances fight over the same LocalAuth userDataDir).
+const creationChainTail = new Map();
+
+const withCreationLock = async (clientId, fn) => {
+  const prev = creationChainTail.get(clientId) || Promise.resolve();
+  let resolveThis;
+  const thisLink = new Promise((resolve) => {
+    resolveThis = resolve;
+  });
+  creationChainTail.set(clientId, thisLink);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    resolveThis();
+    if (creationChainTail.get(clientId) === thisLink) {
+      creationChainTail.delete(clientId);
+    }
+  }
+};
+
 const parseEnvInt = (key, fallback) => {
   const value = parseInt(process.env[key] || `${fallback}`, 10);
   return Number.isFinite(value) ? value : fallback;
@@ -76,18 +98,32 @@ const clearClientSessionData = (clientId) => {
 const getLocalAuthSessionRoot = (clientId) =>
   path.join(SESSIONS_DIR, `session-${clientId}`);
 
+const CHROMIUM_SINGLETON_NAMES = new Set(['SingletonLock', 'SingletonSocket', 'SingletonCookie']);
+
 /**
  * After a container redeploy, Chromium lock files still reference the old hostname/PID.
- * Removing them is safe when no other live process uses this profile (single replica).
+ * Walk the whole profile tree — locks can sit under Default/ or deeper.
+ * Safe when no other live process uses this profile (single replica, serialized create).
  */
 const clearStaleChromiumSingletonArtifacts = (userDataDir) => {
-  const names = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
-  const dirs = [userDataDir, path.join(userDataDir, 'Default')];
-  for (const dir of dirs) {
-    for (const name of names) {
-      removePathIfExists(path.join(dir, name));
+  if (!fs.existsSync(userDataDir)) return;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
     }
-  }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(full);
+      } else if (CHROMIUM_SINGLETON_NAMES.has(ent.name)) {
+        removePathIfExists(full);
+      }
+    }
+  };
+  walk(userDataDir);
 };
 
 const getRetryDelayMs = (attempt) => {
@@ -131,11 +167,19 @@ const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries })
  * Creates and initializes a WhatsApp client for a given clientId
  */
 const createWhatsAppClient = async (clientId, options = {}) => {
+  if (activeClients.has(clientId)) {
+    console.log(`Client ${clientId} already active`);
+    return activeClients.get(clientId);
+  }
+
+  return withCreationLock(clientId, () => createWhatsAppClientLocked(clientId, options));
+};
+
+const createWhatsAppClientLocked = async (clientId, options = {}) => {
   const { forceReauth = false, attempt = 1 } = options;
   const maxRetries = getInitMaxRetries();
 
   if (activeClients.has(clientId)) {
-    console.log(`Client ${clientId} already active`);
     return activeClients.get(clientId);
   }
 
@@ -200,6 +244,9 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     try {
       await wClient.destroy();
     } catch (_) {}
+
+    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
+    await new Promise((r) => setTimeout(r, 500));
 
     const canRetry = attempt <= maxRetries && (timedOut || isRetryableInitError(err));
 
@@ -378,6 +425,7 @@ const destroyClient = async (clientId) => {
       console.error(`Error destroying client ${clientId}:`, err);
     }
     activeClients.delete(clientId);
+    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
   }
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
