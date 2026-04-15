@@ -40,6 +40,7 @@ const getInitTimeoutMs = () => parseEnvInt('WA_INIT_TIMEOUT_MS', 180000);
 const getInitMaxRetries = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 2));
 const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
+const getBootRestoreDelayMs = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 0));
 
 const getDefaultSessionsDir = () =>
   // Always use a stable path under the app root so Docker/host volumes can mount it.
@@ -462,6 +463,12 @@ const sendMessage = async (clientId, phone, message) => {
  */
 const initWhatsAppManager = async () => {
   try {
+    const bootRestoreDelayMs = getBootRestoreDelayMs();
+    if (bootRestoreDelayMs > 0) {
+      console.log(`⏳ Delaying WhatsApp restore by ${bootRestoreDelayMs}ms (WA_BOOT_RESTORE_DELAY_MS)`);
+      await new Promise((r) => setTimeout(r, bootRestoreDelayMs));
+    }
+
     const connectedClients = await WhatsAppClientModel.find({
       status: 'connected',
       isActive: true
