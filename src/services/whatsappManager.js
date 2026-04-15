@@ -40,6 +40,8 @@ const getInitTimeoutMs = () => parseEnvInt('WA_INIT_TIMEOUT_MS', 180000);
 const getInitMaxRetries = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 2));
 const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
+const getProfileLockMaxRetries = () => Math.max(0, parseEnvInt('WA_PROFILE_LOCK_MAX_RETRIES', 20));
+const getProfileLockRetryDelayMs = () => Math.max(1000, parseEnvInt('WA_PROFILE_LOCK_RETRY_DELAY_MS', 30000));
 const getBootRestoreDelayMs = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 0));
 
 const getDefaultSessionsDir = () =>
@@ -149,6 +151,11 @@ const isRetryableInitError = (err) => {
   );
 };
 
+const isProfileLockInitError = (err) => {
+  const msg = (err?.message || '').toLowerCase();
+  return msg.includes('process_singleton') || msg.includes('profile appears to be in use');
+};
+
 const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries }) => {
   const attemptsTotal = maxRetries + 1;
   const base =
@@ -179,6 +186,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 const createWhatsAppClientLocked = async (clientId, options = {}) => {
   const { forceReauth = false, attempt = 1 } = options;
   const maxRetries = getInitMaxRetries();
+  const lockMaxRetries = getProfileLockMaxRetries();
 
   if (activeClients.has(clientId)) {
     return activeClients.get(clientId);
@@ -249,14 +257,16 @@ const createWhatsAppClientLocked = async (clientId, options = {}) => {
     clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
     await new Promise((r) => setTimeout(r, 500));
 
-    const canRetry = attempt <= maxRetries && (timedOut || isRetryableInitError(err));
+    const isProfileLock = isProfileLockInitError(err);
+    const retriesLimit = isProfileLock ? lockMaxRetries : maxRetries;
+    const canRetry = attempt <= retriesLimit && (timedOut || isRetryableInitError(err));
 
     if (canRetry) {
-      const retryDelayMs = getRetryDelayMs(attempt);
+      const retryDelayMs = isProfileLock ? getProfileLockRetryDelayMs() : getRetryDelayMs(attempt);
       const retryAttempt = attempt + 1;
       console.warn(
         `Retrying WhatsApp init for ${clientId} in ${retryDelayMs}ms ` +
-        `(attempt ${retryAttempt}/${maxRetries + 1})`
+        `(attempt ${retryAttempt}/${retriesLimit + 1})`
       );
 
       await WhatsAppClientModel.findOneAndUpdate(
@@ -267,7 +277,7 @@ const createWhatsAppClientLocked = async (clientId, options = {}) => {
       emitToClient(clientId, 'init_retry', {
         clientId,
         attempt: retryAttempt,
-        maxAttempts: maxRetries + 1,
+        maxAttempts: retriesLimit + 1,
         retryInMs: retryDelayMs,
         reason: timedOut ? 'timeout' : (err?.message || 'retryable-init-error')
       });
