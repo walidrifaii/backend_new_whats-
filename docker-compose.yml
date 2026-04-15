@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      # Keeps whatsapp-web.js LocalAuth data across image rebuilds / container recreation
+      - whatsapp_sessions:/app/sessions
+
+volumes:
+  whatsapp_sessions:

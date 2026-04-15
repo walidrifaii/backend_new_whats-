@@ -2,7 +2,6 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
@@ -20,13 +19,10 @@ const getInitMaxRetries = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 2
 const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 
-const getDefaultSessionsDir = () => {
-  // On cloud hosts, app directory may be ephemeral/restricted.
-  if (process.env.NODE_ENV === 'production') {
-    return path.join(os.tmpdir(), 'wwebjs-sessions');
-  }
-  return path.resolve(__dirname, '../../sessions');
-};
+const getDefaultSessionsDir = () =>
+  // Always use a stable path under the app root so Docker/host volumes can mount it.
+  // Do not use os.tmpdir() here — it is cleared on redeploy and forces a new QR.
+  path.resolve(__dirname, '../../sessions');
 
 const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)

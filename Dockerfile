@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y \
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Persist this path across deploys (bind mount or named volume) so WhatsApp sessions survive.
+ENV SESSIONS_DIR=/app/sessions
 
 WORKDIR /app
 COPY package*.json ./
@@ -29,6 +31,8 @@ RUN npm ci --only=production
 COPY . .
 
 RUN mkdir -p sessions uploads
+
+VOLUME ["/app/sessions"]
 
 EXPOSE 5000
 CMD ["node", "src/server.js"]
