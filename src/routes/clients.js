@@ -78,7 +78,7 @@ router.post('/', authMiddleware, [
     const { name } = req.body;
     const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
-    const client = await WhatsAppClientModel.create({
+    const createdClient = await WhatsAppClientModel.create({
       userId: req.user._id,
       name,
       clientId,
@@ -86,10 +86,25 @@ router.post('/', authMiddleware, [
       status: 'disconnected'
     });
 
+    const client = await WhatsAppClientModel.findByIdAndUpdate(
+      createdClient._id,
+      { status: 'initializing' },
+      { new: true }
+    );
+
     res.status(201).json({
       client,
-      qrShare: buildQrSharePayload(req, client.clientId)
+      qrShare: buildQrSharePayload(req, client.clientId),
+      message: 'WhatsApp initialization started. Open the QR link and scan when ready.'
     });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(client.clientId);
+      } catch (err) {
+        console.error(`Init error for ${client.clientId}:`, err);
+      }
+    })();
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
