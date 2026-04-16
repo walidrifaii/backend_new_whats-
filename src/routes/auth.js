@@ -13,6 +13,20 @@ const getTokenExpiryDate = (token) => {
   return new Date(decoded.exp * 1000);
 };
 
+const isJwtUsable = (token) => {
+  try {
+    jwt.verify(token, process.env.JWT_SECRET);
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+const signPermanentUserToken = (userId) => {
+  // Intentionally no expiresIn: token is stable across logins.
+  return jwt.sign({ userId, type: 'user' }, process.env.JWT_SECRET);
+};
+
 // POST /api/auth/register
 router.post('/register', [
   body('name').trim().notEmpty().withMessage('Name is required'),
@@ -28,7 +42,7 @@ router.post('/register', [
     if (existing) return res.status(400).json({ error: 'Email already registered' });
 
     const user = await User.create({ name, email, password });
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = signPermanentUserToken(user._id);
     await User.saveToken(user._id, token);
     await TokenSession.createOrUpdate({
       token,
@@ -59,8 +73,11 @@ router.post('/login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    await User.saveToken(user._id, token);
+    let token = user.authToken;
+    if (!token || !isJwtUsable(token)) {
+      token = signPermanentUserToken(user._id);
+      await User.saveToken(user._id, token);
+    }
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'user',
@@ -118,9 +135,6 @@ router.get('/me', authMiddleware, async (req, res) => {
 // POST /api/auth/logout
 router.post('/logout', authMiddleware, async (req, res) => {
   try {
-    if (!req.user?.isAdmin && req.user?._id) {
-      await User.clearToken(req.user._id);
-    }
     if (req.token) {
       await TokenSession.revoke(req.token);
     }

@@ -27,6 +27,34 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
+// GET /api/clients/user/:userId - list all clients for a specific user
+router.get('/user/:userId', authMiddleware, async (req, res) => {
+  try {
+    const requestedUserId = String(req.params.userId || '').trim();
+    if (!requestedUserId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    const isAdmin = req.user?.isAdmin || req.user?.role === 'admin';
+    if (!isAdmin && requestedUserId !== String(req.user._id)) {
+      return res.status(403).json({ error: 'Access denied for this userId' });
+    }
+
+    const clients = await WhatsAppClientModel.find(
+      { userId: requestedUserId, isActive: true },
+      { sort: { createdAt: -1 } }
+    );
+
+    res.json({
+      userId: requestedUserId,
+      count: clients.length,
+      clients
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/clients - create new client
 router.post('/', authMiddleware, [
   body('name').trim().notEmpty().withMessage('Client name is required')
