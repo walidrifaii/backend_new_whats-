@@ -14,6 +14,18 @@ const withTimeout = (promise, ms, message) => {
   ]);
 };
 
+const buildQrSharePayload = (req, clientId) => {
+  const token = buildClientQrToken(clientId);
+  if (!token) return null;
+
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  return {
+    clientId,
+    pageUrl: `${baseUrl}/public/qr/${clientId}?token=${token}`,
+    imageUrl: `${baseUrl}/public/qr/${clientId}.png?token=${token}`
+  };
+};
+
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
@@ -74,7 +86,10 @@ router.post('/', authMiddleware, [
       status: 'disconnected'
     });
 
-    res.status(201).json({ client });
+    res.status(201).json({
+      client,
+      qrShare: buildQrSharePayload(req, client.clientId)
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -179,22 +194,13 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    const token = buildClientQrToken(client.clientId);
-    if (!token) {
+    const qrShare = buildQrSharePayload(req, client.clientId);
+    if (!qrShare) {
       return res.status(500).json({
         error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
       });
     }
-
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const pageUrl = `${baseUrl}/public/qr/${client.clientId}?token=${token}`;
-    const imageUrl = `${baseUrl}/public/qr/${client.clientId}.png?token=${token}`;
-
-    res.json({
-      clientId: client.clientId,
-      pageUrl,
-      imageUrl
-    });
+    res.json(qrShare);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
