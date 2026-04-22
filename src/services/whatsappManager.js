@@ -1,4 +1,4 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -333,7 +333,7 @@ const destroyAllClients = async () => {
   await Promise.allSettled(ids.map(id => destroyClient(id)));
 };
 
-const sendMessage = async (clientId, phone, message) => {
+const sendMessage = async (clientId, phone, message, opts = null) => {
   const wClient = activeClients.get(clientId);
   if (!wClient) throw new Error(`No active client for ${clientId}`);
   const dbClient = await WhatsAppClientModel.findOne({ clientId });
@@ -341,7 +341,28 @@ const sendMessage = async (clientId, phone, message) => {
     throw new Error(`Client ${clientId} is not connected`);
   }
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-  const result = await wClient.sendMessage(chatId, message);
+  let result;
+
+  const mediaUrl = opts?.mediaUrl && String(opts.mediaUrl).trim()
+    ? String(opts.mediaUrl).trim()
+    : null;
+
+  if (mediaUrl) {
+    try {
+      const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+      if (!media?.data) {
+        throw new Error('Media URL returned empty data');
+      }
+      result = await wClient.sendMessage(chatId, media, {
+        caption: message || ''
+      });
+    } catch (err) {
+      throw new Error(`Media send failed: ${err.message}`);
+    }
+  } else {
+    result = await wClient.sendMessage(chatId, message);
+  }
+
   await WhatsAppClientModel.findOneAndUpdate({ clientId }, { $inc: { messagesSent: 1 } });
   return result;
 };
