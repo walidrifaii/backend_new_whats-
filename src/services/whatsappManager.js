@@ -6,208 +6,170 @@ const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
 
-// In-memory map of active WhatsApp client instances
+// ─── Active clients map ───────────────────────────────────────────────────────
 const activeClients = new Map();
 
-// Ensures only one createWhatsAppClient runs per clientId until activeClients is populated
-// (otherwise two Chromium instances fight over the same LocalAuth userDataDir).
-const creationChainTail = new Map();
-
-const withCreationLock = async (clientId, fn) => {
-  const prev = creationChainTail.get(clientId) || Promise.resolve();
-  let resolveThis;
-  const thisLink = new Promise((resolve) => {
-    resolveThis = resolve;
-  });
-  creationChainTail.set(clientId, thisLink);
-  await prev;
-  try {
-    return await fn();
-  } finally {
-    resolveThis();
-    if (creationChainTail.get(clientId) === thisLink) {
-      creationChainTail.delete(clientId);
-    }
-  }
-};
-
+// ─── Config helpers ───────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
   const value = parseInt(process.env[key] || `${fallback}`, 10);
   return Number.isFinite(value) ? value : fallback;
 };
+const getInitTimeoutMs    = () => parseEnvInt('WA_INIT_TIMEOUT_MS',             180000);
+const getInitMaxRetries   = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 3));
+const getRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
+const getRetryMaxDelayMs  = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
 
-const getInitTimeoutMs = () => parseEnvInt('WA_INIT_TIMEOUT_MS', 180000);
-const getInitMaxRetries = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES', 2));
-const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
-const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
-const getProfileLockMaxRetries = () => Math.max(0, parseEnvInt('WA_PROFILE_LOCK_MAX_RETRIES', 20));
-const getProfileLockRetryDelayMs = () => Math.max(1000, parseEnvInt('WA_PROFILE_LOCK_RETRY_DELAY_MS', 30000));
-const getBootRestoreDelayMs = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 0));
-
-const getDefaultSessionsDir = () =>
-  // Always use a stable path under the app root so Docker/host volumes can mount it.
-  // Do not use os.tmpdir() here — it is cleared on redeploy and forces a new QR.
-  path.resolve(__dirname, '../../sessions');
-
+// ─── Sessions directory ───────────────────────────────────────────────────────
+// MUST be a Docker named-volume path or a persistent VPS directory.
+// Set SESSIONS_DIR in your .env / docker-compose to override.
 const SESSIONS_DIR = process.env.SESSIONS_DIR
   ? path.resolve(process.env.SESSIONS_DIR)
-  : getDefaultSessionsDir();
+  : path.resolve(__dirname, '../../sessions');
 
-// Ensure sessions directory exists
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
+console.log(`📁 Sessions dir: ${SESSIONS_DIR}`);
 
+// ─── Chrome path ──────────────────────────────────────────────────────────────
 const resolveBundledChromePath = () => {
-  const chromeRoot = path.resolve(__dirname, '../../.puppeteer/chrome');
-  if (!fs.existsSync(chromeRoot)) return null;
-
-  const linuxBuilds = fs.readdirSync(chromeRoot)
-    .filter(name => name.startsWith('linux-'))
-    .sort();
-
-  if (!linuxBuilds.length) return null;
-
-  // Pick the newest downloaded build directory.
-  const latestLinuxBuild = linuxBuilds[linuxBuilds.length - 1];
-  const executablePath = path.join(
-    chromeRoot,
-    latestLinuxBuild,
-    'chrome-linux64',
-    'chrome'
-  );
-
-  return fs.existsSync(executablePath) ? executablePath : null;
+  const root = path.resolve(__dirname, '../../.puppeteer/chrome');
+  if (!fs.existsSync(root)) return null;
+  const builds = fs.readdirSync(root).filter(n => n.startsWith('linux-')).sort();
+  if (!builds.length) return null;
+  const exe = path.join(root, builds[builds.length - 1], 'chrome-linux64', 'chrome');
+  return fs.existsSync(exe) ? exe : null;
 };
 
-const removePathIfExists = (targetPath) => {
-  try {
-    if (fs.existsSync(targetPath)) {
-      fs.rmSync(targetPath, { recursive: true, force: true });
+const getChromePath = () =>
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  process.env.CHROME_BIN ||
+  resolveBundledChromePath();
+
+// ─── Session / lock helpers ───────────────────────────────────────────────────
+
+/** Returns the LocalAuth profile root directory for a clientId */
+const getProfileDir = (clientId) => {
+  const primary = path.join(SESSIONS_DIR, `session-${clientId}`);
+  const alt     = path.join(SESSIONS_DIR, clientId);
+  if (fs.existsSync(primary)) return primary;
+  if (fs.existsSync(alt))     return alt;
+  return primary;
+};
+
+/**
+ * A valid session exists when the "Default" sub-directory is present.
+ * (That directory holds IndexedDB / cookies / auth keys.)
+ */
+const sessionExistsOnDisk = (clientId) =>
+  fs.existsSync(path.join(getProfileDir(clientId), 'Default'));
+
+/**
+ * Removes ONLY the Chromium lock files that are left behind after an unclean
+ * shutdown (SIGTERM, OOM kill, Docker stop, new deploy).
+ *
+ * Key insight: SingletonLock is a symlink whose target is "<hostname>-<pid>".
+ * When Docker creates a new container the hostname changes, so Chromium sees
+ * the old symlink as belonging to a "different machine" and refuses to start.
+ * Deleting just these lock files — NOT the session data — lets Chromium reuse
+ * the existing authenticated profile without any QR re-scan.
+ */
+const LOCK_FILES = [
+  'SingletonLock',
+  'SingletonSocket',
+  'SingletonCookie',
+  'lockfile',
+  '.parentlock',
+  'DevToolsActivePort',
+];
+
+const clearChromiumLocks = (clientId) => {
+  const profileDir = getProfileDir(clientId);
+  if (!fs.existsSync(profileDir)) return;
+
+  // Locks appear in both the profile root AND the Default sub-directory
+  const searchDirs = [profileDir, path.join(profileDir, 'Default')];
+
+  for (const dir of searchDirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const lockFile of LOCK_FILES) {
+      const lockPath = path.join(dir, lockFile);
+      try {
+        fs.lstatSync(lockPath); // catches dangling symlinks too
+        fs.rmSync(lockPath, { force: true });
+        console.log(`🔓 Removed lock: ${lockPath}`);
+      } catch (_) { /* file does not exist — nothing to do */ }
     }
-  } catch (err) {
-    console.error(`Failed removing path ${targetPath}:`, err.message);
   }
 };
 
+/** Completely wipes session data (only used for forceReauth / sessionMissing) */
 const clearClientSessionData = (clientId) => {
-  // whatsapp-web.js LocalAuth usually stores session as "session-<clientId>".
-  removePathIfExists(path.join(SESSIONS_DIR, `session-${clientId}`));
-  // Keep compatibility with older/custom layouts.
-  removePathIfExists(path.join(SESSIONS_DIR, clientId));
-};
-
-/** LocalAuth userDataDir (see whatsapp-web.js LocalAuth). */
-const getLocalAuthSessionRoot = (clientId) =>
-  path.join(SESSIONS_DIR, `session-${clientId}`);
-
-const CHROMIUM_SINGLETON_NAMES = new Set(['SingletonLock', 'SingletonSocket', 'SingletonCookie']);
-
-/**
- * After a container redeploy, Chromium lock files still reference the old hostname/PID.
- * Walk the whole profile tree — locks can sit under Default/ or deeper.
- * Safe when no other live process uses this profile (single replica, serialized create).
- */
-const clearStaleChromiumSingletonArtifacts = (userDataDir) => {
-  if (!fs.existsSync(userDataDir)) return;
-  const walk = (dir) => {
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+  const profileDir = getProfileDir(clientId);
+  try {
+    if (fs.existsSync(profileDir)) {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+      console.log(`🗑️  Cleared session data for ${clientId}`);
     }
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        walk(full);
-      } else if (CHROMIUM_SINGLETON_NAMES.has(ent.name)) {
-        removePathIfExists(full);
-      }
-    }
-  };
-  walk(userDataDir);
+  } catch (err) {
+    console.error(`Failed to clear session for ${clientId}:`, err.message);
+  }
 };
 
-const getRetryDelayMs = (attempt) => {
-  const baseDelay = getInitRetryBaseDelayMs();
-  const maxDelay = getInitRetryMaxDelayMs();
-  const delay = baseDelay * Math.pow(2, Math.max(0, attempt - 1));
-  return Math.min(delay, maxDelay);
-};
+// ─── Retry helpers ────────────────────────────────────────────────────────────
+const getRetryDelayMs = (attempt) =>
+  Math.min(getRetryBaseDelayMs() * Math.pow(2, Math.max(0, attempt - 1)), getRetryMaxDelayMs());
 
-const isRetryableInitError = (err) => {
+const isRetryableError = (err) => {
   const msg = (err?.message || '').toLowerCase();
-  if (!msg) return false;
   return (
-    msg.includes('timed out') ||
-    msg.includes('timeout') ||
-    msg.includes('target closed') ||
-    msg.includes('navigation') ||
-    msg.includes('browser') ||
-    msg.includes('websocket') ||
-    msg.includes('singleton') ||
-    msg.includes('profile appears to be in use')
+    msg.includes('timed out')              ||
+    msg.includes('timeout')               ||
+    msg.includes('target closed')         ||
+    msg.includes('navigation')            ||
+    msg.includes('browser')               ||
+    msg.includes('websocket')             ||
+    msg.includes('profile appears to be') ||  // SingletonLock conflict
+    msg.includes('singleton')             ||  // SingletonLock conflict
+    msg.includes('failed to launch')          // generic Chromium launch failure
   );
 };
 
-const isProfileLockInitError = (err) => {
-  const msg = (err?.message || '').toLowerCase();
-  return msg.includes('process_singleton') || msg.includes('profile appears to be in use');
-};
-
-const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxRetries }) => {
-  const attemptsTotal = maxRetries + 1;
-  const base =
-    timedOut
-      ? `WhatsApp initialization timed out for ${clientId}.`
-      : `WhatsApp initialization failed for ${clientId}.`;
-
-  const details = err?.message ? ` Reason: ${err.message}` : '';
-  const attemptText = ` Attempt ${attempt}/${attemptsTotal}.`;
-  const hint =
-    ' If running on Render free tier, warm-up/cold starts can delay QR. Check Chrome path and increase WA_INIT_TIMEOUT_MS.';
-
-  return `${base}${attemptText}${details}${hint}`;
-};
+// ─── Core: createWhatsAppClient ───────────────────────────────────────────────
 
 /**
- * Creates and initializes a WhatsApp client for a given clientId
+ * @param {string} clientId
+ * @param {object} [opts]
+ * @param {boolean} [opts.forceReauth=false]    – wipe session, force new QR
+ * @param {boolean} [opts.sessionMissing=false] – session files gone, go to QR
+ * @param {number}  [opts.attempt=1]            – current retry (internal use)
  */
-const createWhatsAppClient = async (clientId, options = {}) => {
+const createWhatsAppClient = async (clientId, opts = {}) => {
+  const { forceReauth = false, sessionMissing = false, attempt = 1 } = opts;
+  const maxRetries = getInitMaxRetries();
+
   if (activeClients.has(clientId)) {
     console.log(`Client ${clientId} already active`);
     return activeClients.get(clientId);
   }
 
-  return withCreationLock(clientId, () => createWhatsAppClientLocked(clientId, options));
-};
+  console.log(`🔧 Init ${clientId} (attempt ${attempt}/${maxRetries + 1})`);
 
-const createWhatsAppClientLocked = async (clientId, options = {}) => {
-  const { forceReauth = false, attempt = 1 } = options;
-  const maxRetries = getInitMaxRetries();
-  const lockMaxRetries = getProfileLockMaxRetries();
-
-  if (activeClients.has(clientId)) {
-    return activeClients.get(clientId);
-  }
-
-  console.log(`Initializing WhatsApp client: ${clientId}`);
-
-  if (forceReauth && attempt === 1) {
-    console.log(`Clearing stale session data for ${clientId}`);
+  // ── Handle session data ────────────────────────────────────────────────────
+  if ((forceReauth || sessionMissing) && attempt === 1) {
+    // Full wipe — user must scan a new QR
     clearClientSessionData(clientId);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'disconnected', qrCode: null, phone: '' }
     );
+  } else {
+    // Normal start or retry: remove stale lock files only, keep auth data
+    clearChromiumLocks(clientId);
   }
 
-  const chromeExecutablePath =
-    process.env.PUPPETEER_EXECUTABLE_PATH ||
-    process.env.CHROME_BIN ||
-    resolveBundledChromePath();
-
+  // ── Puppeteer config ───────────────────────────────────────────────────────
+  const chromePath = getChromePath();
   const puppeteerConfig = {
     headless: true,
     args: [
@@ -218,101 +180,89 @@ const createWhatsAppClientLocked = async (clientId, options = {}) => {
       '--no-first-run',
       '--no-zygote',
       '--disable-gpu',
-      // Persisted profile on a new container: old SingletonLock references previous hostname.
-      '--disable-process-singleton-check'
-    ]
+      '--disable-extensions',
+      '--disable-background-networking',
+    ],
   };
-
-  if (chromeExecutablePath) {
-    puppeteerConfig.executablePath = chromeExecutablePath;
-    console.log(`Using Chrome executable at: ${chromeExecutablePath}`);
+  if (chromePath) {
+    puppeteerConfig.executablePath = chromePath;
+    console.log(`🌐 Chrome: ${chromePath}`);
   }
 
+  // ── Build Client ───────────────────────────────────────────────────────────
   const wClient = new Client({
-    authStrategy: new LocalAuth({
-      clientId: clientId,
-      dataPath: SESSIONS_DIR
-    }),
+    authStrategy: new LocalAuth({ clientId, dataPath: SESSIONS_DIR }),
     puppeteer: puppeteerConfig,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0
+    takeoverTimeoutMs: 0,
   });
 
-  const initTimeoutMs = getInitTimeoutMs();
-  let initSettled = false;
+  let initSettled      = false;
+  let initTimeoutHandle = null;
+
   const settleInit = () => {
+    if (initSettled) return;
     initSettled = true;
     if (initTimeoutHandle) clearTimeout(initTimeoutHandle);
   };
 
-  const scheduleRetry = async ({ timedOut = false, err = null }) => {
+  // ── Retry / give-up ────────────────────────────────────────────────────────
+  const scheduleRetry = async ({ timedOut = false, err = null } = {}) => {
     if (initSettled) return;
     settleInit();
     activeClients.delete(clientId);
+    try { await wClient.destroy(); } catch (_) {}
 
-    try {
-      await wClient.destroy();
-    } catch (_) {}
-
-    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
-    await new Promise((r) => setTimeout(r, 500));
-
-    const isProfileLock = isProfileLockInitError(err);
-    const retriesLimit = isProfileLock ? lockMaxRetries : maxRetries;
-    const canRetry = attempt <= retriesLimit && (timedOut || isRetryableInitError(err));
+    const canRetry = attempt <= maxRetries && (timedOut || isRetryableError(err));
 
     if (canRetry) {
-      const retryDelayMs = isProfileLock ? getProfileLockRetryDelayMs() : getRetryDelayMs(attempt);
-      const retryAttempt = attempt + 1;
-      console.warn(
-        `Retrying WhatsApp init for ${clientId} in ${retryDelayMs}ms ` +
-        `(attempt ${retryAttempt}/${retriesLimit + 1})`
-      );
+      const delay       = getRetryDelayMs(attempt);
+      const nextAttempt = attempt + 1;
+      console.warn(`♻️  Retrying ${clientId} in ${delay}ms (attempt ${nextAttempt}/${maxRetries + 1})`);
 
       await WhatsAppClientModel.findOneAndUpdate(
         { clientId },
         { status: 'initializing', qrCode: null }
       );
-
       emitToClient(clientId, 'init_retry', {
-        clientId,
-        attempt: retryAttempt,
-        maxAttempts: retriesLimit + 1,
-        retryInMs: retryDelayMs,
-        reason: timedOut ? 'timeout' : (err?.message || 'retryable-init-error')
+        clientId, attempt: nextAttempt,
+        maxAttempts: maxRetries + 1, retryInMs: delay,
+        reason: timedOut ? 'timeout' : (err?.message || 'error'),
       });
 
       setTimeout(() => {
-        createWhatsAppClient(clientId, { forceReauth: false, attempt: retryAttempt }).catch((retryErr) => {
-          console.error(`Retry bootstrap failed for ${clientId}:`, retryErr);
-        });
-      }, retryDelayMs);
-
+        clearChromiumLocks(clientId); // clear locks before each retry
+        createWhatsAppClient(clientId, { attempt: nextAttempt }).catch(e =>
+          console.error(`Retry failed for ${clientId}:`, e)
+        );
+      }, delay);
       return;
     }
 
+    // All retries exhausted
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'disconnected', qrCode: null }
     );
-
+    const reason = timedOut ? 'timeout' : (err?.message || 'init failed');
+    console.error(`❌ ${clientId} failed after ${attempt} attempt(s): ${reason}`);
     emitToClient(clientId, 'init_error', {
       clientId,
-      message: buildInitErrorMessage({ clientId, err, timedOut, attempt, maxRetries })
+      message: `WhatsApp init failed for ${clientId}. Reason: ${reason}. Please reconnect from the dashboard.`,
     });
   };
 
-  // Prevent "initializing forever" when deployment cannot reach QR/ready.
-  const initTimeoutHandle = setTimeout(async () => {
+  // ── Timeout watchdog ───────────────────────────────────────────────────────
+  initTimeoutHandle = setTimeout(async () => {
     if (initSettled) return;
-    console.error(`Initialization timeout for ${clientId} after ${initTimeoutMs}ms`);
+    console.error(`⏰ Init timeout for ${clientId}`);
     await scheduleRetry({ timedOut: true });
-  }, initTimeoutMs);
+  }, getInitTimeoutMs());
 
-  // QR Code event
+  // ── Events ─────────────────────────────────────────────────────────────────
   wClient.on('qr', async (qr) => {
-    console.log(`QR received for client: ${clientId}`);
     settleInit();
+    console.log(`📱 QR for ${clientId}`);
     try {
       const qrDataUrl = await qrcode.toDataURL(qr);
       await WhatsAppClientModel.findOneAndUpdate(
@@ -320,123 +270,103 @@ const createWhatsAppClientLocked = async (clientId, options = {}) => {
         { status: 'qr_ready', qrCode: qrDataUrl }
       );
       emitToClient(clientId, 'qr', { clientId, qr: qrDataUrl });
-    } catch (err) {
-      console.error(`QR generation error for ${clientId}:`, err);
+    } catch (e) {
+      console.error(`QR error for ${clientId}:`, e);
     }
   });
 
-  // Ready event
   wClient.on('ready', async () => {
-    console.log(`✅ WhatsApp client ready: ${clientId}`);
     settleInit();
-    const info = wClient.info;
+    const phone = wClient.info?.wid?.user || '';
+    console.log(`✅ Ready: ${clientId} (${phone})`);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
-      {
-        status: 'connected',
-        qrCode: null,
-        phone: info?.wid?.user || '',
-        lastConnected: new Date()
-      }
+      { status: 'connected', qrCode: null, phone, lastConnected: new Date() }
     );
-    emitToClient(clientId, 'ready', { clientId, phone: info?.wid?.user });
+    emitToClient(clientId, 'ready', { clientId, phone });
   });
 
-  // Auth failure event
   wClient.on('auth_failure', async (msg) => {
-    console.error(`Auth failure for ${clientId}:`, msg);
     settleInit();
+    console.error(`🔐 Auth failure for ${clientId}:`, msg);
+    activeClients.delete(clientId);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'auth_failure', qrCode: null }
     );
     emitToClient(clientId, 'auth_failure', { clientId, message: msg });
-    activeClients.delete(clientId);
+
+    // Auto-recover: wipe corrupted session → fresh QR
+    console.log(`🔄 Auto-recovering ${clientId} after auth_failure...`);
+    clearClientSessionData(clientId);
+    setTimeout(() =>
+      createWhatsAppClient(clientId, { forceReauth: true }).catch(e =>
+        console.error(`Auth-failure recovery failed for ${clientId}:`, e)
+      ), 3000
+    );
   });
 
-  // Disconnected event
   wClient.on('disconnected', async (reason) => {
-    console.log(`Client ${clientId} disconnected:`, reason);
     settleInit();
+    console.log(`🔌 ${clientId} disconnected: ${reason}`);
+    activeClients.delete(clientId);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'disconnected', qrCode: null }
     );
     emitToClient(clientId, 'disconnected', { clientId, reason });
-    activeClients.delete(clientId);
   });
 
-  // Incoming message event
   wClient.on('message', async (msg) => {
     try {
       const dbClient = await WhatsAppClientModel.findOne({ clientId });
       if (!dbClient) return;
 
-      const bodyText = typeof msg.body === 'string' ? msg.body.trim() : '';
+      const bodyText    = typeof msg.body === 'string' ? msg.body.trim() : '';
       const captionText = typeof msg?._data?.caption === 'string' ? msg._data.caption.trim() : '';
       const messageType = msg?.type || (msg?.hasMedia ? 'media' : 'unknown');
-      const messageTextForLog = bodyText || captionText || `[${messageType}]`;
-      const normalizedPhone = (msg.from || '').replace('@c.us', '');
-
-      console.log(`📨 Incoming message for ${clientId} from ${msg.from}: ${messageTextForLog}`);
+      const logText     = bodyText || captionText || `[${messageType}]`;
 
       await MessageLog.create({
-        userId: dbClient.userId,
-        clientId: dbClient._id,
-        phone: normalizedPhone,
-        message: messageTextForLog,
-        direction: 'incoming',
-        status: 'received',
-        whatsappMessageId: msg?.id?._serialized
+        userId: dbClient.userId, clientId: dbClient._id,
+        phone: (msg.from || '').replace('@c.us', ''),
+        message: logText, direction: 'incoming', status: 'received',
+        whatsappMessageId: msg?.id?._serialized,
       });
 
       emitToClient(clientId, 'incoming-message', {
-        clientId,
-        from: msg.from,
+        clientId, from: msg.from,
         body: bodyText || captionText || '',
-        type: messageType,
-        timestamp: msg.timestamp
+        type: messageType, timestamp: msg.timestamp,
       });
-    } catch (err) {
-      console.error('Error saving incoming message:', err);
+    } catch (e) {
+      console.error('Error saving incoming message:', e);
     }
   });
 
-  // Initialize the client
-  await WhatsAppClientModel.findOneAndUpdate(
-    { clientId },
-    { status: 'initializing' }
-  );
-
-  clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
-
+  // ── Launch ─────────────────────────────────────────────────────────────────
+  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing' });
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
-    console.error(`Failed to initialize WhatsApp client ${clientId}:`, err);
+    console.error(`Failed to init ${clientId}:`, err.message);
     await scheduleRetry({ err });
   });
 
   return wClient;
 };
 
-/**
- * Get an active client instance
- */
-const getClient = (clientId) => activeClients.get(clientId);
+// ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Destroy and remove a client
- */
+const getClient        = (clientId) => activeClients.get(clientId);
+const isClientConnected = (clientId) => activeClients.has(clientId);
+
 const destroyClient = async (clientId) => {
   const wClient = activeClients.get(clientId);
   if (wClient) {
-    try {
-      await wClient.destroy();
-    } catch (err) {
-      console.error(`Error destroying client ${clientId}:`, err);
+    try { await wClient.destroy(); } catch (e) {
+      console.error(`Destroy error for ${clientId}:`, e);
     }
     activeClients.delete(clientId);
-    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
   }
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
@@ -444,31 +374,6 @@ const destroyClient = async (clientId) => {
   );
 };
 
-/**
- * Gracefully destroy all active clients (used on process shutdown)
- * so Chromium profile locks are released before container exit.
- */
-const destroyAllClientsGracefully = async () => {
-  const clientIds = Array.from(activeClients.keys());
-  if (clientIds.length === 0) return;
-
-  console.log(`🧹 Destroying ${clientIds.length} active WhatsApp client(s) before shutdown...`);
-  for (const clientId of clientIds) {
-    const wClient = activeClients.get(clientId);
-    if (!wClient) continue;
-    try {
-      await wClient.destroy();
-    } catch (err) {
-      console.error(`Error destroying client ${clientId} during shutdown:`, err.message);
-    }
-    activeClients.delete(clientId);
-    clearStaleChromiumSingletonArtifacts(getLocalAuthSessionRoot(clientId));
-  }
-};
-
-/**
- * Send a message using an active client
- */
 const sendMessage = async (clientId, phone, message) => {
   const wClient = activeClients.get(clientId);
   if (!wClient) throw new Error(`No active client for ${clientId}`);
@@ -480,63 +385,74 @@ const sendMessage = async (clientId, phone, message) => {
 
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const result = await wClient.sendMessage(chatId, message);
-
-  // Update message count
-  await WhatsAppClientModel.findOneAndUpdate(
-    { clientId },
-    { $inc: { messagesSent: 1 } }
-  );
-
+  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { $inc: { messagesSent: 1 } });
   return result;
 };
 
 /**
- * On server start: re-initialize clients that were previously connected
+ * Called on server startup. Restores all previously active WhatsApp sessions.
+ *
+ * Decision table:
+ * ┌────────────────────────────────────┬─────────────────────────────────────┐
+ * │ DB status                          │ Action                              │
+ * ├────────────────────────────────────┼─────────────────────────────────────┤
+ * │ connected  + session on disk       │ clearLocks only → silent reconnect  │
+ * │ connected  + NO session on disk    │ clearData → fresh QR                │
+ * │ qr_ready / initializing            │ clearLocks → restart (new QR)       │
+ * │ auth_failure                       │ clearData → fresh QR                │
+ * └────────────────────────────────────┴─────────────────────────────────────┘
  */
 const initWhatsAppManager = async () => {
   try {
-    const bootRestoreDelayMs = getBootRestoreDelayMs();
-    if (bootRestoreDelayMs > 0) {
-      console.log(`⏳ Delaying WhatsApp restore by ${bootRestoreDelayMs}ms (WA_BOOT_RESTORE_DELAY_MS)`);
-      await new Promise((r) => setTimeout(r, bootRestoreDelayMs));
-    }
-
-    const connectedClients = await WhatsAppClientModel.find({
-      status: 'connected',
-      isActive: true
+    const clients = await WhatsAppClientModel.find({
+      status: { $in: ['connected', 'initializing', 'qr_ready', 'auth_failure'] },
+      isActive: true,
     });
 
-    console.log(`🔄 Restoring ${connectedClients.length} WhatsApp sessions...`);
+    console.log(`🔄 Restoring ${clients.length} WhatsApp client(s)...`);
 
-    for (const client of connectedClients) {
+    for (const client of clients) {
       try {
-        await createWhatsAppClient(client.clientId);
-        // Small delay to avoid overwhelming the system
-        await new Promise(r => setTimeout(r, 2000));
+        const { clientId, status } = client;
+
+        if (status === 'auth_failure') {
+          console.log(`🔐 ${clientId}: auth_failure → fresh QR`);
+          clearClientSessionData(clientId);
+          await createWhatsAppClient(clientId, { forceReauth: true });
+
+        } else if (status === 'connected' && !sessionExistsOnDisk(clientId)) {
+          console.log(`⚠️  ${clientId}: session missing on disk → fresh QR`);
+          await createWhatsAppClient(clientId, { sessionMissing: true });
+
+        } else if (status === 'connected') {
+          console.log(`✅ ${clientId}: restoring session silently`);
+          // clearChromiumLocks is called automatically inside createWhatsAppClient
+          await createWhatsAppClient(clientId);
+
+        } else {
+          console.log(`🔁 ${clientId}: was "${status}" → restarting`);
+          clearChromiumLocks(clientId);
+          await createWhatsAppClient(clientId);
+        }
+
+        await new Promise(r => setTimeout(r, 2500)); // stagger to avoid CPU spike
       } catch (err) {
-        console.error(`Error restoring client ${client.clientId}:`, err);
+        console.error(`Error restoring ${client.clientId}:`, err);
       }
     }
-  } catch (err) {
-    console.error('Error in initWhatsAppManager:', err);
-  }
-};
 
-/**
- * Check if a client is currently connected
- */
-const isClientConnected = (clientId) => {
-  const wClient = activeClients.get(clientId);
-  return !!wClient;
+    console.log('✅ WhatsApp manager ready.');
+  } catch (err) {
+    console.error('initWhatsAppManager error:', err);
+  }
 };
 
 module.exports = {
   createWhatsAppClient,
   getClient,
   destroyClient,
-  destroyAllClientsGracefully,
   sendMessage,
   initWhatsAppManager,
   isClientConnected,
-  activeClients
+  activeClients,
 };
