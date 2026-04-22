@@ -6,59 +6,52 @@ const cors = require('cors');
 const path = require('path');
 const { testConnection } = require('./db/mysql');
 
-const authRoutes = require('./routes/auth');
-const clientRoutes = require('./routes/clients');
+const authRoutes     = require('./routes/auth');
+const clientRoutes   = require('./routes/clients');
 const campaignRoutes = require('./routes/campaigns');
-const contactRoutes = require('./routes/contacts');
-const messageRoutes = require('./routes/messages');
-const logRoutes = require('./routes/logs');
-const adminRoutes = require('./routes/admin');
-const TokenSession = require('./models/TokenSession');
-const User = require('./models/User');
+const contactRoutes  = require('./routes/contacts');
+const messageRoutes  = require('./routes/messages');
+const logRoutes      = require('./routes/logs');
+const adminRoutes    = require('./routes/admin');
+
+const TokenSession        = require('./models/TokenSession');
+const User                = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
-const { initWhatsAppManager, destroyAllClientsGracefully } = require('./services/whatsappManager');
-const { prepareCampaignsForShutdown, resumeCampaignsAfterBoot } = require('./services/campaignQueue');
+const { initWhatsAppManager, destroyAllClients } = require('./services/whatsappManager');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection:', reason);
 });
-
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception:', error);
 });
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-let isShuttingDown = false;
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
+  .split(',').map(o => o.trim()).filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow server-to-server, curl, and same-origin requests with no Origin header.
     if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: false,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
 };
 
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins.length > 0 ? allowedOrigins : '*',
-    methods: ['GET', 'POST']
-  }
+    methods: ['GET', 'POST'],
+  },
 });
 
 setSocketIO(io);
@@ -69,16 +62,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/clients', clientRoutes);
+app.use('/api/auth',      authRoutes);
+app.use('/api/clients',   clientRoutes);
 app.use('/api/campaigns', campaignRoutes);
-app.use('/api/contacts', contactRoutes);
-app.use('/api/messages', messageRoutes);
-app.use('/api/logs', logRoutes);
-app.use('/api/admin', adminRoutes);
+app.use('/api/contacts',  contactRoutes);
+app.use('/api/messages',  messageRoutes);
+app.use('/api/logs',      logRoutes);
+app.use('/api/admin',     adminRoutes);
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
 const getQrCodeBuffer = (dataUrl) => {
   if (typeof dataUrl !== 'string') return null;
@@ -87,23 +79,19 @@ const getQrCodeBuffer = (dataUrl) => {
   return Buffer.from(match[1], 'base64');
 };
 
-// Public QR page (token-protected) for easy sharing.
+// Public QR page (token-protected)
 app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
   try {
     const token = String(req.query.token || '');
     if (!isClientQrTokenValid(req.params.clientId, token)) {
       return res.status(403).send('Invalid or missing QR share token');
     }
-
-    const client = await WhatsAppClientModel.findOne({
-      clientId: req.params.clientId,
-      isActive: true
-    });
+    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
     if (!client) return res.status(404).send('Client not found');
 
-    const qrCode = client.qrCode || '';
-    const hasQr = qrCode.startsWith('data:image/png;base64,');
-    const qrImageHtml = hasQr
+    const qrCode  = client.qrCode || '';
+    const hasQr   = qrCode.startsWith('data:image/png;base64,');
+    const qrHtml  = hasQr
       ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
       : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
 
@@ -118,7 +106,7 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
   <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#f3f4f6;">
     <main style="text-align:center;padding:24px;">
       <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">Scan WhatsApp QR</h1>
-      ${qrImageHtml}
+      ${qrHtml}
     </main>
   </body>
 </html>`);
@@ -127,18 +115,14 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
   }
 });
 
-// Direct QR image endpoint (PNG only), useful when you need image-only URL.
+// Direct QR image (PNG)
 app.get('/public/qr/:clientId.png', async (req, res) => {
   try {
     const token = String(req.query.token || '');
     if (!isClientQrTokenValid(req.params.clientId, token)) {
       return res.status(403).send('Invalid or missing QR share token');
     }
-
-    const client = await WhatsAppClientModel.findOne({
-      clientId: req.params.clientId,
-      isActive: true
-    });
+    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
     if (!client) return res.status(404).send('Client not found');
 
     const imageBuffer = getQrCodeBuffer(client.qrCode);
@@ -151,7 +135,7 @@ app.get('/public/qr/:clientId.png', async (req, res) => {
   }
 });
 
-// Socket.IO connection
+// Socket.IO
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
   socket.on('join-client-room', (clientId) => {
@@ -163,7 +147,36 @@ io.on('connection', (socket) => {
   });
 });
 
-// MySQL connection
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+let isShuttingDown = false;
+
+const gracefulShutdown = async (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`🛑 Received ${signal}. Preparing graceful shutdown...`);
+
+  try {
+    await destroyAllClients();
+  } catch (err) {
+    console.error('Error while destroying WhatsApp clients:', err.message);
+  }
+
+  server.close(() => {
+    console.log('✅ HTTP server closed. Exiting.');
+    process.exit(0);
+  });
+
+  // Force exit after 15 s if something hangs
+  setTimeout(() => {
+    console.error('⚠️  Forced exit after timeout.');
+    process.exit(1);
+  }, 15000).unref();
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
 if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_NAME) {
   console.error('❌ Missing MySQL env variables (DB_HOST, DB_USER, DB_NAME)');
   process.exit(1);
@@ -175,36 +188,13 @@ testConnection()
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     console.log('✅ MySQL connected');
-    initWhatsAppManager().catch((err) => {
-      console.error('initWhatsAppManager startup error:', err);
-    });
-
-    const campaignResumeDelayMs = Math.max(
-      0,
-      parseInt(
-        process.env.WA_BOOT_CAMPAIGN_RESUME_DELAY_MS ||
-        process.env.WA_BOOT_RESTORE_DELAY_MS ||
-        '0',
-        10
-      ) || 0
-    );
-    if (campaignResumeDelayMs > 0) {
-      console.log(`⏳ Delaying campaign auto-resume by ${campaignResumeDelayMs}ms`);
-    }
-    setTimeout(async () => {
-      try {
-        const { resumedCount, deferredCount } = await resumeCampaignsAfterBoot();
-        if (resumedCount > 0 || deferredCount > 0) {
-          console.log(`♻️ Campaign recovery: resumed=${resumedCount}, deferred=${deferredCount}`);
-        }
-      } catch (err) {
-        console.error('Campaign auto-resume error:', err);
-      }
-    }, campaignResumeDelayMs);
 
     server.listen(process.env.PORT || 5000, () => {
       console.log(`🚀 Server running on port ${process.env.PORT || 5000}`);
     });
+
+    // Start WhatsApp restore after server is listening
+    initWhatsAppManager();
   })
   .catch(err => {
     console.error('❌ MySQL connection error:', err);
@@ -212,43 +202,3 @@ testConnection()
   });
 
 module.exports = { app, io };
-
-const gracefulShutdown = async (signal) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  console.log(`🛑 Received ${signal}. Preparing graceful shutdown...`);
-
-  try {
-    await prepareCampaignsForShutdown();
-  } catch (err) {
-    console.error('Error while preparing campaigns for shutdown:', err);
-  }
-
-  try {
-    await destroyAllClientsGracefully();
-  } catch (err) {
-    console.error('Error while destroying WhatsApp clients for shutdown:', err);
-  }
-
-  // Give Chromium a short moment to release profile locks.
-  await new Promise((r) => setTimeout(r, 1000));
-
-  try {
-    server.close(() => {
-      process.exit(0);
-    });
-  } catch (_) {
-    process.exit(0);
-  }
-
-  // Hard fallback in case close hangs.
-  setTimeout(() => process.exit(0), 10000).unref();
-};
-
-process.on('SIGTERM', () => {
-  gracefulShutdown('SIGTERM');
-});
-
-process.on('SIGINT', () => {
-  gracefulShutdown('SIGINT');
-});

@@ -40,9 +40,17 @@ const buildFilter = (filter = {}) => {
     clauses.push('client_id = ?');
     values.push(String(filter.clientId));
   }
+  // Support both a plain string  { status: 'connected' }
+  // and a $in array              { status: { $in: ['connected', 'qr_ready'] } }
   if (filter.status !== undefined) {
-    clauses.push('status = ?');
-    values.push(String(filter.status));
+    if (filter.status !== null && typeof filter.status === 'object' && Array.isArray(filter.status.$in)) {
+      const placeholders = filter.status.$in.map(() => '?').join(', ');
+      clauses.push(`status IN (${placeholders})`);
+      filter.status.$in.forEach(s => values.push(String(s)));
+    } else {
+      clauses.push('status = ?');
+      values.push(String(filter.status));
+    }
   }
 
   return { clauses, values };
@@ -103,8 +111,6 @@ class WhatsAppClientModel {
     if (options.limit !== undefined && options.limit !== null) {
       const limit = Number(options.limit);
       if (Number.isFinite(limit) && limit > 0) {
-        // Keep LIMIT as a numeric literal to avoid prepared-statement
-        // argument issues seen on some MySQL/MariaDB deployments.
         sql += ` LIMIT ${Math.floor(limit)}`;
       }
     }
