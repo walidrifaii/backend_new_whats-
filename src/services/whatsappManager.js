@@ -97,6 +97,19 @@ const hasClientSessionData = (clientId) => {
   return getClientSessionPaths(clientId).some((sessionPath) => fs.existsSync(sessionPath));
 };
 
+const getClientSessionLockPaths = (clientId) => {
+  return getClientSessionPaths(clientId).flatMap((sessionPath) => [
+    path.join(sessionPath, 'SingletonLock'),
+    path.join(sessionPath, 'SingletonSocket'),
+    path.join(sessionPath, 'SingletonCookie'),
+    path.join(sessionPath, 'DevToolsActivePort')
+  ]);
+};
+
+const hasClientSessionLock = (clientId) => {
+  return getClientSessionLockPaths(clientId).some((lockPath) => fs.existsSync(lockPath));
+};
+
 const getRetryDelayMs = (attempt) => {
   const baseDelay = getInitRetryBaseDelayMs();
   const maxDelay = getInitRetryMaxDelayMs();
@@ -172,11 +185,64 @@ const incrementQrEventCount = (clientId) => {
   return count;
 };
 
+const scheduleProfileLockRetry = ({ clientId, attempt, maxAttempts, preserveStatusOnInit }) => {
+  const lockRetryCount = (profileLockRetryCounts.get(clientId) || 0) + 1;
+  const maxLockRetries = getProfileLockMaxRetries();
+
+  if (lockRetryCount > maxLockRetries) {
+    clearClientStartProgress(clientId);
+    console.error(
+      `Chrome profile stayed locked for ${clientId} after ${maxLockRetries} retries. ` +
+      'Preserving WhatsApp session data and database status.'
+    );
+    emitToClient(clientId, 'init_error', {
+      clientId,
+      message:
+        `Chrome profile is still locked for ${clientId}. ` +
+        'The old deployment may still be stopping. Try again after it fully exits.'
+    });
+    return null;
+  }
+
+  const retryDelayMs = getProfileLockRetryDelayMs();
+  profileLockRetryCounts.set(clientId, lockRetryCount);
+  pendingClientStarts.set(clientId, {
+    attempt,
+    maxAttempts,
+    retryInMs: retryDelayMs,
+    status: 'waiting-for-profile-lock',
+    startedAt: new Date()
+  });
+  console.warn(
+    `Chrome profile is still locked for ${clientId}. ` +
+    `Waiting ${retryDelayMs}ms before retry ${lockRetryCount}/${maxLockRetries}.`
+  );
+
+  const retryTimeoutHandle = setTimeout(() => {
+    retryTimeoutHandles.delete(clientId);
+    createWhatsAppClient(clientId, {
+      forceReauth: false,
+      attempt,
+      preserveStatusOnInit,
+      internalRetry: true
+    }).catch((retryErr) => {
+      console.error(`Profile-lock retry failed for ${clientId}:`, retryErr);
+    });
+  }, retryDelayMs);
+  retryTimeoutHandles.set(clientId, retryTimeoutHandle);
+  return retryTimeoutHandle;
+};
+
 /**
  * Creates and initializes a WhatsApp client for a given clientId
  */
 const createWhatsAppClient = async (clientId, options = {}) => {
-  const { forceReauth = false, attempt = 1, preserveStatusOnInit = false } = options;
+  const {
+    forceReauth = false,
+    attempt = 1,
+    preserveStatusOnInit = false,
+    internalRetry = false
+  } = options;
   const maxAttempts = getInitMaxAttempts();
 
   if (isManagerShuttingDown) {
@@ -201,7 +267,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   }
 
   const startProgress = getClientStartProgress(clientId);
-  if (attempt === 1 && startProgress && !forceReauth) {
+  if (attempt === 1 && startProgress && !forceReauth && !internalRetry) {
     const message =
       `WhatsApp client ${clientId} is already ${startProgress.status} ` +
       `(attempt ${startProgress.attempt}/${startProgress.maxAttempts}). Wait for it to finish.`;
@@ -229,6 +295,11 @@ const createWhatsAppClient = async (clientId, options = {}) => {
       { clientId },
       { status: 'disconnected', qrCode: null, phone: '' }
     );
+  }
+
+  if (preserveStatusOnInit && hasClientSessionLock(clientId)) {
+    scheduleProfileLockRetry({ clientId, attempt, maxAttempts, preserveStatusOnInit });
+    return null;
   }
 
   const chromeExecutablePath =
@@ -304,49 +375,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
     const profileLocked = isProfileLockedError(err);
     if (profileLocked) {
-      const lockRetryCount = (profileLockRetryCounts.get(clientId) || 0) + 1;
-      const maxLockRetries = getProfileLockMaxRetries();
-
-      if (lockRetryCount <= maxLockRetries) {
-        const retryDelayMs = getProfileLockRetryDelayMs();
-        profileLockRetryCounts.set(clientId, lockRetryCount);
-        pendingClientStarts.set(clientId, {
-          attempt,
-          maxAttempts,
-          retryInMs: retryDelayMs,
-          status: 'waiting-for-profile-lock',
-          startedAt: new Date()
-        });
-        console.warn(
-          `Chrome profile is still locked for ${clientId}. ` +
-          `Waiting ${retryDelayMs}ms before retry ${lockRetryCount}/${maxLockRetries}.`
-        );
-
-        const retryTimeoutHandle = setTimeout(() => {
-          retryTimeoutHandles.delete(clientId);
-          createWhatsAppClient(clientId, {
-            forceReauth: false,
-            attempt,
-            preserveStatusOnInit
-          }).catch((retryErr) => {
-            console.error(`Profile-lock retry failed for ${clientId}:`, retryErr);
-          });
-        }, retryDelayMs);
-        retryTimeoutHandles.set(clientId, retryTimeoutHandle);
-        return;
-      }
-
-      clearClientStartProgress(clientId);
-      console.error(
-        `Chrome profile stayed locked for ${clientId} after ${maxLockRetries} retries. ` +
-        'Preserving WhatsApp session data and database status.'
-      );
-      emitToClient(clientId, 'init_error', {
-        clientId,
-        message:
-          `Chrome profile is still locked for ${clientId}. ` +
-          'The old deployment may still be stopping. Try again after it fully exits.'
-      });
+      scheduleProfileLockRetry({ clientId, attempt, maxAttempts, preserveStatusOnInit });
       return;
     }
 
