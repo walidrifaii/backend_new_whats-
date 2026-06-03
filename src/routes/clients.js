@@ -3,7 +3,13 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
+const {
+  createWhatsAppClient,
+  destroyClient,
+  getClientStartBlock,
+  getClientStartProgress,
+  isClientConnected
+} = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildClientQrToken } = require('../utils/qrShare');
 
@@ -62,12 +68,32 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
+    const shouldForceReauth =
+      req.query.reset === '1' || req.body?.forceReauth === true;
+
     if (client.status === 'connected' && isClientConnected(client.clientId)) {
       return res.json({ message: 'Client already connected', client });
     }
 
-    const shouldForceReauth =
-      req.query.reset === '1' || req.body?.forceReauth === true;
+    const startBlock = getClientStartBlock(client.clientId);
+    if (startBlock && !shouldForceReauth) {
+      return res.status(409).json({
+        error:
+          `WhatsApp connection stopped after ${startBlock.maxAttempts} failed attempts. ` +
+          'Use reset=1 or forceReauth to try again.',
+        clientId: client.clientId
+      });
+    }
+
+    const startProgress = getClientStartProgress(client.clientId);
+    if (startProgress && !shouldForceReauth) {
+      return res.json({
+        message:
+          `Client is already ${startProgress.status}. ` +
+          `Wait for attempt ${startProgress.attempt}/${startProgress.maxAttempts} to finish.`,
+        clientId: client.clientId
+      });
+    }
 
     if (isClientConnected(client.clientId) && !shouldForceReauth) {
       return res.json({
