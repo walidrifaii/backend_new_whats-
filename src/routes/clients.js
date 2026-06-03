@@ -3,7 +3,13 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
+const {
+  createWhatsAppClient,
+  destroyClient,
+  getClientStartBlock,
+  getClientStartProgress,
+  isClientConnected
+} = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildClientQrToken } = require('../utils/qrShare');
 
@@ -14,18 +20,6 @@ const withTimeout = (promise, ms, message) => {
   ]);
 };
 
-const buildQrSharePayload = (req, clientId) => {
-  const token = buildClientQrToken(clientId);
-  if (!token) return null;
-
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  return {
-    clientId,
-    pageUrl: `${baseUrl}/public/qr/${clientId}?token=${token}`,
-    imageUrl: `${baseUrl}/public/qr/${clientId}.png?token=${token}`
-  };
-};
-
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
@@ -34,34 +28,6 @@ router.get('/', authMiddleware, async (req, res) => {
       { sort: { createdAt: -1 } }
     );
     res.json({ clients });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/clients/user/:userId - list all clients for a specific user
-router.get('/user/:userId', authMiddleware, async (req, res) => {
-  try {
-    const requestedUserId = String(req.params.userId || '').trim();
-    if (!requestedUserId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
-
-    const isAdmin = req.user?.isAdmin || req.user?.role === 'admin';
-    if (!isAdmin && requestedUserId !== String(req.user._id)) {
-      return res.status(403).json({ error: 'Access denied for this userId' });
-    }
-
-    const clients = await WhatsAppClientModel.find(
-      { userId: requestedUserId, isActive: true },
-      { sort: { createdAt: -1 } }
-    );
-
-    res.json({
-      userId: requestedUserId,
-      count: clients.length,
-      clients
-    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -78,7 +44,7 @@ router.post('/', authMiddleware, [
     const { name } = req.body;
     const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
 
-    const createdClient = await WhatsAppClientModel.create({
+    const client = await WhatsAppClientModel.create({
       userId: req.user._id,
       name,
       clientId,
@@ -86,25 +52,7 @@ router.post('/', authMiddleware, [
       status: 'disconnected'
     });
 
-    const client = await WhatsAppClientModel.findByIdAndUpdate(
-      createdClient._id,
-      { status: 'initializing' },
-      { new: true }
-    );
-
-    res.status(201).json({
-      client,
-      qrShare: buildQrSharePayload(req, client.clientId),
-      message: 'WhatsApp initialization started. Open the QR link and scan when ready.'
-    });
-
-    (async () => {
-      try {
-        await createWhatsAppClient(client.clientId);
-      } catch (err) {
-        console.error(`Init error for ${client.clientId}:`, err);
-      }
-    })();
+    res.status(201).json({ client });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -120,12 +68,32 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
+    const shouldForceReauth =
+      req.query.reset === '1' || req.body?.forceReauth === true;
+
     if (client.status === 'connected' && isClientConnected(client.clientId)) {
       return res.json({ message: 'Client already connected', client });
     }
 
-    const shouldForceReauth =
-      req.query.reset === '1' || req.body?.forceReauth === true;
+    const startBlock = getClientStartBlock(client.clientId);
+    if (startBlock && !shouldForceReauth) {
+      return res.status(409).json({
+        error:
+          `WhatsApp connection stopped: ${startBlock.reason || 'maximum attempts reached'}. ` +
+          'Use reset=1 or forceReauth to try again.',
+        clientId: client.clientId
+      });
+    }
+
+    const startProgress = getClientStartProgress(client.clientId);
+    if (startProgress && !shouldForceReauth) {
+      return res.json({
+        message:
+          `Client is already ${startProgress.status}. ` +
+          `Wait for attempt ${startProgress.attempt}/${startProgress.maxAttempts} to finish.`,
+        clientId: client.clientId
+      });
+    }
 
     if (isClientConnected(client.clientId) && !shouldForceReauth) {
       return res.json({
@@ -158,7 +126,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       }
 
       try {
-      await   createWhatsAppClient(client.clientId);
+        await createWhatsAppClient(client.clientId, { forceReauth: shouldForceReauth });
       } catch (err) {
         console.error(`Init error for ${client.clientId}:`, err);
       }
@@ -209,13 +177,22 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    const qrShare = buildQrSharePayload(req, client.clientId);
-    if (!qrShare) {
+    const token = buildClientQrToken(client.clientId);
+    if (!token) {
       return res.status(500).json({
         error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
       });
     }
-    res.json(qrShare);
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const pageUrl = `${baseUrl}/public/qr/${client.clientId}?token=${token}`;
+    const imageUrl = `${baseUrl}/public/qr/${client.clientId}.png?token=${token}`;
+
+    res.json({
+      clientId: client.clientId,
+      pageUrl,
+      imageUrl
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
