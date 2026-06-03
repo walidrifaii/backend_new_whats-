@@ -15,6 +15,7 @@ const retryTimeoutHandles = new Map();
 const qrEventCounts = new Map();
 const preservingClientShutdowns = new Set();
 const profileLockRetryCounts = new Map();
+const profileLockFirstSeenAt = new Map();
 let isManagerShuttingDown = false;
 
 const parseEnvInt = (key, fallback) => {
@@ -30,6 +31,7 @@ const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 const getProfileLockRetryDelayMs = () => Math.max(5000, parseEnvInt('WA_PROFILE_LOCK_RETRY_DELAY_MS', 15000));
 const getProfileLockMaxRetries = () => Math.max(1, parseEnvInt('WA_PROFILE_LOCK_MAX_RETRIES', 12));
+const getProfileLockStaleAfterMs = () => Math.max(30000, parseEnvInt('WA_PROFILE_LOCK_STALE_AFTER_MS', 90000));
 const getRestoreStartDelayMs = () => Math.max(0, parseEnvInt('WA_RESTORE_START_DELAY_MS', 30000));
 
 const getDefaultSessionsDir = () => {
@@ -110,6 +112,33 @@ const hasClientSessionLock = (clientId) => {
   return getClientSessionLockPaths(clientId).some((lockPath) => fs.existsSync(lockPath));
 };
 
+const clearClientSessionLocks = (clientId) => {
+  getClientSessionLockPaths(clientId).forEach(removePathIfExists);
+};
+
+const clearStaleClientSessionLocks = (clientId) => {
+  if (!hasClientSessionLock(clientId)) {
+    profileLockFirstSeenAt.delete(clientId);
+    return false;
+  }
+
+  const now = Date.now();
+  const firstSeenAt = profileLockFirstSeenAt.get(clientId) || now;
+  profileLockFirstSeenAt.set(clientId, firstSeenAt);
+
+  if (now - firstSeenAt < getProfileLockStaleAfterMs()) {
+    return false;
+  }
+
+  console.warn(
+    `Session lock for ${clientId} looks stale after ${now - firstSeenAt}ms. ` +
+    'Removing Chromium lock files only.'
+  );
+  clearClientSessionLocks(clientId);
+  profileLockFirstSeenAt.delete(clientId);
+  return true;
+};
+
 const getRetryDelayMs = (attempt) => {
   const baseDelay = getInitRetryBaseDelayMs();
   const maxDelay = getInitRetryMaxDelayMs();
@@ -160,6 +189,10 @@ const getClientStartBlock = (clientId) => stoppedClientStarts.get(clientId) || n
 const clearClientStartBlock = (clientId) => stoppedClientStarts.delete(clientId);
 const clearQrEventCount = (clientId) => qrEventCounts.delete(clientId);
 const clearProfileLockRetryCount = (clientId) => profileLockRetryCounts.delete(clientId);
+const clearProfileLockState = (clientId) => {
+  profileLockRetryCounts.delete(clientId);
+  profileLockFirstSeenAt.delete(clientId);
+};
 
 const clearRetryTimeout = (clientId) => {
   const retryTimeoutHandle = retryTimeoutHandles.get(clientId);
@@ -188,6 +221,9 @@ const incrementQrEventCount = (clientId) => {
 const scheduleProfileLockRetry = ({ clientId, attempt, maxAttempts, preserveStatusOnInit }) => {
   const lockRetryCount = (profileLockRetryCounts.get(clientId) || 0) + 1;
   const maxLockRetries = getProfileLockMaxRetries();
+  if (!profileLockFirstSeenAt.has(clientId)) {
+    profileLockFirstSeenAt.set(clientId, Date.now());
+  }
 
   if (lockRetryCount > maxLockRetries) {
     clearClientStartProgress(clientId);
@@ -253,7 +289,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     clearClientStartBlock(clientId);
     clearClientStartProgress(clientId);
     clearQrEventCount(clientId);
-    clearProfileLockRetryCount(clientId);
+    clearProfileLockState(clientId);
   }
 
   const startBlock = getClientStartBlock(clientId);
@@ -289,7 +325,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     );
   }
 
-  if (preserveStatusOnInit && hasClientSessionLock(clientId)) {
+  if (preserveStatusOnInit && hasClientSessionLock(clientId) && !clearStaleClientSessionLocks(clientId)) {
     console.warn(`Session lock exists for ${clientId}; waiting before launching Chrome.`);
     scheduleProfileLockRetry({ clientId, attempt, maxAttempts, preserveStatusOnInit });
     return null;
@@ -380,7 +416,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
       return;
     }
 
-    clearProfileLockRetryCount(clientId);
+    clearProfileLockState(clientId);
     if (!preserveStatusOnInit) {
       clearClientSessionData(clientId);
     } else {
@@ -437,7 +473,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
     clearClientStartProgress(clientId);
     clearQrEventCount(clientId);
-    clearProfileLockRetryCount(clientId);
+    clearProfileLockState(clientId);
     stoppedClientStarts.set(clientId, {
       maxAttempts,
       failedAt: new Date(),
@@ -535,7 +571,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     clearClientStartProgress(clientId);
     clearClientStartBlock(clientId);
     clearQrEventCount(clientId);
-    clearProfileLockRetryCount(clientId);
+    clearProfileLockState(clientId);
     const info = wClient.info;
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
