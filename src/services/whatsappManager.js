@@ -280,14 +280,6 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     return activeClients.get(clientId);
   }
 
-  pendingClientStarts.set(clientId, {
-    attempt,
-    maxAttempts,
-    status: 'initializing',
-    startedAt: new Date()
-  });
-  console.log(`Initializing WhatsApp client: ${clientId} (attempt ${attempt}/${maxAttempts})`);
-
   if (forceReauth && attempt === 1) {
     console.log(`Clearing stale session data for ${clientId}`);
     clearClientSessionData(clientId);
@@ -298,9 +290,18 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   }
 
   if (preserveStatusOnInit && hasClientSessionLock(clientId)) {
+    console.warn(`Session lock exists for ${clientId}; waiting before launching Chrome.`);
     scheduleProfileLockRetry({ clientId, attempt, maxAttempts, preserveStatusOnInit });
     return null;
   }
+
+  pendingClientStarts.set(clientId, {
+    attempt,
+    maxAttempts,
+    status: 'initializing',
+    startedAt: new Date()
+  });
+  console.log(`Initializing WhatsApp client: ${clientId} (attempt ${attempt}/${maxAttempts})`);
 
   const chromeExecutablePath =
     process.env.PUPPETEER_EXECUTABLE_PATH ||
