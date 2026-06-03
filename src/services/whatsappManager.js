@@ -30,6 +30,7 @@ const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 const getProfileLockRetryDelayMs = () => Math.max(5000, parseEnvInt('WA_PROFILE_LOCK_RETRY_DELAY_MS', 15000));
 const getProfileLockMaxRetries = () => Math.max(1, parseEnvInt('WA_PROFILE_LOCK_MAX_RETRIES', 12));
+const getRestoreStartDelayMs = () => Math.max(0, parseEnvInt('WA_RESTORE_START_DELAY_MS', 30000));
 
 const getDefaultSessionsDir = () => {
   // On cloud hosts, app directory may be ephemeral/restricted.
@@ -590,6 +591,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
+    activeClients.delete(clientId);
     console.error(`Failed to initialize WhatsApp client ${clientId}:`, err);
     await scheduleRetry({ err });
   });
@@ -678,6 +680,14 @@ const sendMessage = async (clientId, phone, message) => {
  */
 const initWhatsAppManager = async () => {
   try {
+    const restoreStartDelayMs = getRestoreStartDelayMs();
+    if (restoreStartDelayMs > 0) {
+      console.log(`⏳ Waiting ${restoreStartDelayMs}ms before restoring WhatsApp sessions...`);
+      await new Promise(r => setTimeout(r, restoreStartDelayMs));
+    }
+
+    if (isManagerShuttingDown) return;
+
     const connectedClients = await WhatsAppClientModel.find({
       status: 'connected',
       isActive: true
