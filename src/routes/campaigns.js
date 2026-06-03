@@ -7,6 +7,7 @@ const User = require('../models/User');
 const { query } = require('../db/mysql');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const { startCampaign, pauseCampaign, resumeCampaign } = require('../services/campaignQueue');
+const { getClientStartProgress, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const {
   resolveMediaUrlForDb,
@@ -139,6 +140,16 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
 
     if (client.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
+    }
+
+    const startProgress = getClientStartProgress(client.clientId);
+    if (startProgress || !isClientConnected(client.clientId)) {
+      return res.status(409).json({
+        error: startProgress
+          ? `WhatsApp client is ${startProgress.status}. Wait for restore to finish before starting campaign.`
+          : 'WhatsApp client is restoring. Wait until it is active before starting campaign.',
+        clientId: client.clientId
+      });
     }
 
     if (campaign.totalContacts === 0) {

@@ -7,7 +7,7 @@ const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { query } = require('../db/mysql');
-const { sendMessage } = require('./whatsappManager');
+const { getClientStartProgress, isClientConnected, sendMessage } = require('./whatsappManager');
 const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
@@ -97,6 +97,53 @@ const removeRecoveryFile = () => {
   }
 };
 
+const isTemporaryClientUnavailableError = (err) => {
+  const message = String(err?.message || '').toLowerCase();
+  return (
+    message.includes('no active client') ||
+    message.includes('is not connected') ||
+    message.includes('waiting-for-profile-lock') ||
+    message.includes('restoring')
+  );
+};
+
+const pauseCampaignForClientRestore = async (campaignId, clientId, reason) => {
+  await Campaign.findByIdAndUpdate(campaignId, { status: 'paused' });
+  campaignQueues.delete(String(campaignId));
+
+  const recoveryIds = readRecoveryCampaignIds();
+  writeRecoveryCampaignIds([...recoveryIds, String(campaignId)]);
+
+  emitToClient(clientId, 'campaign-paused-client-restoring', {
+    campaignId,
+    message: reason
+  });
+  console.warn(`⏸️ Campaign ${campaignId} paused: ${reason}`);
+};
+
+const ensureClientReadyForCampaign = async (campaignId, clientId) => {
+  const progress = getClientStartProgress(clientId);
+  if (progress) {
+    await pauseCampaignForClientRestore(
+      campaignId,
+      clientId,
+      `WhatsApp client is ${progress.status}; campaign will resume after restore.`
+    );
+    return false;
+  }
+
+  if (!isClientConnected(clientId)) {
+    await pauseCampaignForClientRestore(
+      campaignId,
+      clientId,
+      'WhatsApp client is connected in DB but not active in this server yet; campaign will resume after restore.'
+    );
+    return false;
+  }
+
+  return true;
+};
+
 /**
  * Process a single campaign: iterate through pending contacts,
  * send messages with delay, update progress
@@ -113,6 +160,10 @@ const processCampaign = async (campaignId) => {
   const campaignOwner = await User.findById(dbClient.userId);
 
   console.log(`🚀 Starting campaign ${campaignId} via client ${clientId}`);
+
+  if (!(await ensureClientReadyForCampaign(campaignId, clientId))) {
+    return;
+  }
 
   // Get all pending contacts in batches
   let hasMore = true;
@@ -186,6 +237,10 @@ const processCampaign = async (campaignId) => {
       let error = null;
       let whatsappId = null;
 
+      if (!(await ensureClientReadyForCampaign(campaignId, clientId))) {
+        return;
+      }
+
       try {
         const sendOpts =
           campaign.mediaUrl && String(campaign.mediaUrl).trim()
@@ -196,6 +251,15 @@ const processCampaign = async (campaignId) => {
         success = true;
         console.log(`✅ Sent to ${phone} for campaign ${campaignId}`);
       } catch (err) {
+        if (isTemporaryClientUnavailableError(err)) {
+          await pauseCampaignForClientRestore(
+            campaignId,
+            clientId,
+            `WhatsApp client is temporarily unavailable: ${err.message}. Campaign will resume after restore.`
+          );
+          return;
+        }
+
         error = err.message;
         console.error(`❌ Failed to send to ${phone}:`, err.message);
       }
@@ -375,7 +439,12 @@ const resumeCampaignsAfterBoot = async () => {
       if (!isRecoverableStatus || !hasPending) continue;
 
       const dbClient = await WhatsAppClientModel.findOne({ _id: campaign.clientId, isActive: true });
-      if (!dbClient || dbClient.status !== 'connected') {
+      if (
+        !dbClient ||
+        dbClient.status !== 'connected' ||
+        getClientStartProgress(dbClient.clientId) ||
+        !isClientConnected(dbClient.clientId)
+      ) {
         deferred.push(campaignId);
         continue;
       }

@@ -19,6 +19,7 @@ const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
 const { initWhatsAppManager, shutdownWhatsAppManager } = require('./services/whatsappManager');
+const { prepareCampaignsForShutdown, resumeCampaignsAfterBoot } = require('./services/campaignQueue');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -32,6 +33,19 @@ process.on('uncaughtException', (error) => {
 const app = express();
 const server = http.createServer(app);
 let isShuttingDown = false;
+let campaignRecoveryRunning = false;
+
+const runCampaignRecovery = async () => {
+  if (campaignRecoveryRunning || isShuttingDown) return;
+  campaignRecoveryRunning = true;
+  try {
+    await resumeCampaignsAfterBoot();
+  } catch (err) {
+    console.error('Campaign recovery error:', err);
+  } finally {
+    campaignRecoveryRunning = false;
+  }
+};
 
 const gracefulShutdown = async (signal) => {
   if (isShuttingDown) return;
@@ -40,9 +54,10 @@ const gracefulShutdown = async (signal) => {
   console.log(`🛑 Received ${signal}. Closing server without disconnecting WhatsApp sessions...`);
 
   try {
+    await prepareCampaignsForShutdown();
     await shutdownWhatsAppManager();
   } catch (err) {
-    console.error('Error during WhatsApp shutdown:', err);
+    console.error('Error during shutdown:', err);
   }
 
   io.close();
@@ -200,7 +215,10 @@ testConnection()
     console.log('✅ MySQL connected');
     server.listen(process.env.PORT || 5000, () => {
       console.log(`🚀 Server running on port ${process.env.PORT || 5000}`);
-      initWhatsAppManager();
+      initWhatsAppManager()
+        .then(() => runCampaignRecovery())
+        .catch((err) => console.error('Startup restore error:', err));
+      setInterval(runCampaignRecovery, 60000).unref();
     });
   })
   .catch(err => {
