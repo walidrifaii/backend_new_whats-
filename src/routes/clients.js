@@ -79,7 +79,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     if (startBlock && !shouldForceReauth) {
       return res.status(409).json({
         error:
-          `WhatsApp connection stopped after ${startBlock.maxAttempts} failed attempts. ` +
+          `WhatsApp connection stopped: ${startBlock.reason || 'maximum attempts reached'}. ` +
           'Use reset=1 or forceReauth to try again.',
         clientId: client.clientId
       });

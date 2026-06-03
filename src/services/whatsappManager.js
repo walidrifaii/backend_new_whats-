@@ -12,6 +12,7 @@ const activeClients = new Map();
 const pendingClientStarts = new Map();
 const stoppedClientStarts = new Map();
 const retryTimeoutHandles = new Map();
+const qrEventCounts = new Map();
 
 const parseEnvInt = (key, fallback) => {
   const value = parseInt(process.env[key] || `${fallback}`, 10);
@@ -21,6 +22,7 @@ const parseEnvInt = (key, fallback) => {
 const getInitTimeoutMs = () => parseEnvInt('WA_INIT_TIMEOUT_MS', 180000);
 const getReadyTimeoutMs = () => parseEnvInt('WA_READY_TIMEOUT_MS', getInitTimeoutMs());
 const getInitMaxAttempts = () => Math.max(1, parseEnvInt('WA_INIT_MAX_ATTEMPTS', 4));
+const getMaxQrEvents = () => Math.max(1, parseEnvInt('WA_MAX_QR_EVENTS', 4));
 const getInitRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 5000));
 const getInitRetryMaxDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS', 30000));
 
@@ -117,6 +119,7 @@ const buildInitErrorMessage = ({ clientId, err, timedOut, attempt, maxAttempts }
 const getClientStartProgress = (clientId) => pendingClientStarts.get(clientId) || null;
 const getClientStartBlock = (clientId) => stoppedClientStarts.get(clientId) || null;
 const clearClientStartBlock = (clientId) => stoppedClientStarts.delete(clientId);
+const clearQrEventCount = (clientId) => qrEventCounts.delete(clientId);
 
 const clearRetryTimeout = (clientId) => {
   const retryTimeoutHandle = retryTimeoutHandles.get(clientId);
@@ -131,6 +134,12 @@ const clearClientStartProgress = (clientId) => {
   clearRetryTimeout(clientId);
 };
 
+const incrementQrEventCount = (clientId) => {
+  const count = (qrEventCounts.get(clientId) || 0) + 1;
+  qrEventCounts.set(clientId, count);
+  return count;
+};
+
 /**
  * Creates and initializes a WhatsApp client for a given clientId
  */
@@ -141,12 +150,13 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   if (forceReauth && attempt === 1) {
     clearClientStartBlock(clientId);
     clearClientStartProgress(clientId);
+    clearQrEventCount(clientId);
   }
 
   const startBlock = getClientStartBlock(clientId);
   if (startBlock && !forceReauth) {
     const message =
-      `WhatsApp client ${clientId} stopped after ${startBlock.maxAttempts} failed attempts. ` +
+      `WhatsApp client ${clientId} stopped: ${startBlock.reason || 'maximum attempts reached'}. ` +
       'Use reset=1 or forceReauth to try again.';
     console.warn(message);
     emitToClient(clientId, 'init_error', { clientId, message });
@@ -219,6 +229,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
 
   const initTimeoutMs = getInitTimeoutMs();
   const readyTimeoutMs = getReadyTimeoutMs();
+  const maxQrEvents = getMaxQrEvents();
   let attemptFinished = false;
   let ready = false;
   let connectTimeoutHandle = null;
@@ -295,6 +306,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     }
 
     clearClientStartProgress(clientId);
+    clearQrEventCount(clientId);
     stoppedClientStarts.set(clientId, {
       maxAttempts,
       failedAt: new Date(),
@@ -330,8 +342,20 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   // QR Code event
   wClient.on('qr', async (qr) => {
     if (attemptFinished) return;
+    const qrEventCount = incrementQrEventCount(clientId);
+
+    if (qrEventCount > maxQrEvents) {
+      const err = new Error(`QR limit reached (${maxQrEvents}) without connection`);
+      console.error(`${err.message} for ${clientId}. Stopping QR generation.`);
+      await scheduleRetry({ err, retryable: false });
+      return;
+    }
+
     clearInitTimer();
-    console.log(`QR received for client: ${clientId} (attempt ${attempt}/${maxAttempts})`);
+    console.log(
+      `QR received for client: ${clientId} ` +
+      `(QR ${qrEventCount}/${maxQrEvents}, attempt ${attempt}/${maxAttempts})`
+    );
 
     if (!connectTimeoutHandle) {
       console.log(
@@ -354,6 +378,12 @@ const createWhatsAppClient = async (clientId, options = {}) => {
         { status: 'qr_ready', qrCode: qrDataUrl }
       );
       emitToClient(clientId, 'qr', { clientId, qr: qrDataUrl });
+
+      if (qrEventCount >= maxQrEvents && !ready) {
+        const err = new Error(`QR limit reached (${maxQrEvents}) without connection`);
+        console.error(`${err.message} for ${clientId}. No more QR sessions will be created.`);
+        await scheduleRetry({ err, retryable: false });
+      }
     } catch (err) {
       console.error(`QR generation error for ${clientId}:`, err);
     }
@@ -366,6 +396,7 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     finishAttempt();
     clearClientStartProgress(clientId);
     clearClientStartBlock(clientId);
+    clearQrEventCount(clientId);
     const info = wClient.info;
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
