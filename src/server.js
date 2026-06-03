@@ -18,7 +18,7 @@ const User = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
-const { initWhatsAppManager } = require('./services/whatsappManager');
+const { initWhatsAppManager, shutdownWhatsAppManager } = require('./services/whatsappManager');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -31,6 +31,31 @@ process.on('uncaughtException', (error) => {
 
 const app = express();
 const server = http.createServer(app);
+let isShuttingDown = false;
+
+const gracefulShutdown = async (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`🛑 Received ${signal}. Closing server without disconnecting WhatsApp sessions...`);
+
+  try {
+    await shutdownWhatsAppManager();
+  } catch (err) {
+    console.error('Error during WhatsApp shutdown:', err);
+  }
+
+  io.close();
+  server.close(() => process.exit(0));
+
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 25000).unref();
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 const allowedOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')

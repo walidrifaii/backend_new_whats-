@@ -13,6 +13,7 @@ const pendingClientStarts = new Map();
 const stoppedClientStarts = new Map();
 const retryTimeoutHandles = new Map();
 const qrEventCounts = new Map();
+const preservingClientShutdowns = new Set();
 
 const parseEnvInt = (key, fallback) => {
   const value = parseInt(process.env[key] || `${fallback}`, 10);
@@ -144,7 +145,7 @@ const incrementQrEventCount = (clientId) => {
  * Creates and initializes a WhatsApp client for a given clientId
  */
 const createWhatsAppClient = async (clientId, options = {}) => {
-  const { forceReauth = false, attempt = 1 } = options;
+  const { forceReauth = false, attempt = 1, preserveStatusOnInit = false } = options;
   const maxAttempts = getInitMaxAttempts();
 
   if (forceReauth && attempt === 1) {
@@ -423,6 +424,14 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   // Disconnected event
   wClient.on('disconnected', async (reason) => {
     console.log(`Client ${clientId} disconnected:`, reason);
+    if (preservingClientShutdowns.has(clientId)) {
+      finishAttempt();
+      clearClientStartProgress(clientId);
+      activeClients.delete(clientId);
+      console.log(`Preserved database status for ${clientId} during server shutdown`);
+      return;
+    }
+
     if (!ready) {
       await scheduleRetry({
         err: new Error(`Disconnected before ready: ${reason || 'unknown reason'}`),
@@ -478,10 +487,12 @@ const createWhatsAppClient = async (clientId, options = {}) => {
   });
 
   // Initialize the client
-  await WhatsAppClientModel.findOneAndUpdate(
-    { clientId },
-    { status: 'initializing' }
-  );
+  if (!preserveStatusOnInit) {
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'initializing' }
+    );
+  }
 
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
@@ -500,8 +511,14 @@ const getClient = (clientId) => activeClients.get(clientId);
 /**
  * Destroy and remove a client
  */
-const destroyClient = async (clientId) => {
+const destroyClient = async (clientId, options = {}) => {
+  const { preserveStatus = false } = options;
   const wClient = activeClients.get(clientId);
+
+  if (preserveStatus) {
+    preservingClientShutdowns.add(clientId);
+  }
+
   if (wClient) {
     try {
       await wClient.destroy();
@@ -510,10 +527,29 @@ const destroyClient = async (clientId) => {
     }
     activeClients.delete(clientId);
   }
+
+  if (preserveStatus) {
+    setTimeout(() => preservingClientShutdowns.delete(clientId), 10000);
+    return;
+  }
+
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
     { status: 'disconnected', qrCode: null }
   );
+};
+
+const shutdownWhatsAppManager = async () => {
+  const clientIds = Array.from(activeClients.keys());
+  console.log(`🧹 Closing ${clientIds.length} WhatsApp client(s) without changing DB status...`);
+
+  await Promise.all(clientIds.map(async (clientId) => {
+    try {
+      await destroyClient(clientId, { preserveStatus: true });
+    } catch (err) {
+      console.error(`Error closing client ${clientId} during shutdown:`, err);
+    }
+  }));
 };
 
 /**
@@ -554,7 +590,7 @@ const initWhatsAppManager = async () => {
 
     for (const client of connectedClients) {
       try {
-        await createWhatsAppClient(client.clientId);
+        await createWhatsAppClient(client.clientId, { preserveStatusOnInit: true });
         // Small delay to avoid overwhelming the system
         await new Promise(r => setTimeout(r, 2000));
       } catch (err) {
@@ -580,6 +616,7 @@ module.exports = {
   getClientStartProgress,
   getClientStartBlock,
   destroyClient,
+  shutdownWhatsAppManager,
   sendMessage,
   initWhatsAppManager,
   isClientConnected,
