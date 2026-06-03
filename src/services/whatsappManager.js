@@ -88,6 +88,15 @@ const clearClientSessionData = (clientId) => {
   removePathIfExists(path.join(SESSIONS_DIR, clientId));
 };
 
+const getClientSessionPaths = (clientId) => [
+  path.join(SESSIONS_DIR, `session-${clientId}`),
+  path.join(SESSIONS_DIR, clientId)
+];
+
+const hasClientSessionData = (clientId) => {
+  return getClientSessionPaths(clientId).some((sessionPath) => fs.existsSync(sessionPath));
+};
+
 const getRetryDelayMs = (attempt) => {
   const baseDelay = getInitRetryBaseDelayMs();
   const maxDelay = getInitRetryMaxDelayMs();
@@ -342,7 +351,11 @@ const createWhatsAppClient = async (clientId, options = {}) => {
     }
 
     clearProfileLockRetryCount(clientId);
-    clearClientSessionData(clientId);
+    if (!preserveStatusOnInit) {
+      clearClientSessionData(clientId);
+    } else {
+      console.warn(`Preserving session data for ${clientId} during restore retry`);
+    }
 
     const shouldRetry = retryable === null
       ? (timedOut || isRetryableInitError(err))
@@ -697,6 +710,18 @@ const initWhatsAppManager = async () => {
 
     for (const client of connectedClients) {
       try {
+        if (!hasClientSessionData(client.clientId)) {
+          console.warn(
+            `Session files missing for connected client ${client.clientId}. ` +
+            'Marking disconnected so DB matches disk state.'
+          );
+          await WhatsAppClientModel.findOneAndUpdate(
+            { clientId: client.clientId },
+            { status: 'disconnected', qrCode: null }
+          );
+          continue;
+        }
+
         await createWhatsAppClient(client.clientId, { preserveStatusOnInit: true });
         // Small delay to avoid overwhelming the system
         await new Promise(r => setTimeout(r, 2000));
