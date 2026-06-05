@@ -9,15 +9,23 @@ const { emitToClient } = require('../utils/socket');
 // ─── Active clients map ───────────────────────────────────────────────────────
 const activeClients = new Map();
 
+// Per-client QR state — stuck unauthenticated clients keep Chromium alive and can OOM the server.
+const qrMeta = new Map();
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
   const v = parseInt(process.env[key] || `${fallback}`, 10);
   return Number.isFinite(v) ? v : fallback;
 };
-const getInitTimeoutMs    = () => parseEnvInt('WA_INIT_TIMEOUT_MS',              180000);
-const getInitMaxRetries   = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES',  3));
-const getRetryBaseDelayMs = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
-const getRetryMaxDelayMs  = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
+const getInitTimeoutMs        = () => parseEnvInt('WA_INIT_TIMEOUT_MS',              180000);
+const getInitMaxRetries       = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES',  3));
+const getRetryBaseDelayMs     = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
+const getRetryMaxDelayMs      = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
+const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE_MS', 20000));
+const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 900000));
+const getQrMaxRefreshes       = () => Math.max(10, parseEnvInt('WA_QR_MAX_REFRESHES', 60));
+const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 2));
+const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 
 // ─── Sessions directory ───────────────────────────────────────────────────────
 // On a VPS: defaults to <project-root>/sessions — a persistent directory.
@@ -126,6 +134,64 @@ const isRetryableError = (err) => {
   );
 };
 
+const clearQrMeta = (clientId) => {
+  const meta = qrMeta.get(clientId);
+  if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
+  qrMeta.delete(clientId);
+};
+
+const getQrMeta = (clientId) => {
+  if (!qrMeta.has(clientId)) {
+    qrMeta.set(clientId, {
+      refreshCount: 0,
+      lastHandledAt: 0,
+      pendingTimer: null,
+      handling: false,
+      releasing: false,
+    });
+  }
+  return qrMeta.get(clientId);
+};
+
+/**
+ * Stops Chromium for clients that never finish scanning QR.
+ * Each headless Chrome uses ~200–500 MB; leaving them running crashes small VPS/Docker hosts.
+ */
+const releaseQrPendingClient = async (clientId, reason) => {
+  const meta = qrMeta.get(clientId);
+  if (meta?.releasing) return;
+  if (meta) meta.releasing = true;
+  if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
+
+  console.warn(`⏹️  ${clientId}: QR abandoned (${reason}) — stopping Chromium to free memory`);
+
+  const wClient = activeClients.get(clientId);
+  activeClients.delete(clientId);
+  if (wClient) {
+    try { await wClient.destroy(); } catch (_) {}
+  }
+
+  clearQrMeta(clientId);
+  await WhatsAppClientModel.findOneAndUpdate(
+    { clientId },
+    { status: 'disconnected', qrCode: null }
+  );
+  emitToClient(clientId, 'qr_expired', {
+    clientId,
+    message: 'QR timed out without scan. Reconnect from the dashboard when ready.',
+  });
+};
+
+const startQrPendingTimer = (clientId) => {
+  const meta = getQrMeta(clientId);
+  if (meta.pendingTimer) return;
+  meta.pendingTimer = setTimeout(() => {
+    releaseQrPendingClient(clientId, `no scan within ${getQrPendingTimeoutMs()}ms`).catch((e) =>
+      console.error(`QR release failed for ${clientId}:`, e.message)
+    );
+  }, getQrPendingTimeoutMs());
+};
+
 // ─── createWhatsAppClient ─────────────────────────────────────────────────────
 
 /**
@@ -190,6 +256,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   const scheduleRetry = async ({ timedOut = false, err = null } = {}) => {
     if (initSettled) return;
     settleInit();
+    clearQrMeta(clientId);
     activeClients.delete(clientId);
     try { await wClient.destroy(); } catch (_) {}
 
@@ -232,16 +299,38 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 
   wClient.on('qr', async (qr) => {
     settleInit();
-    console.log(`📱 QR for ${clientId}`);
+
+    const meta = getQrMeta(clientId);
+    meta.refreshCount += 1;
+    startQrPendingTimer(clientId);
+
+    if (meta.refreshCount > getQrMaxRefreshes()) {
+      await releaseQrPendingClient(clientId, `${meta.refreshCount} refreshes without scan`);
+      return;
+    }
+
+    const now = Date.now();
+    if (meta.handling || (meta.refreshCount > 1 && now - meta.lastHandledAt < getQrThrottleMs())) {
+      return;
+    }
+
+    meta.handling = true;
     try {
+      console.log(`📱 QR for ${clientId} (#${meta.refreshCount})`);
       const qrDataUrl = await qrcode.toDataURL(qr);
       await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'qr_ready', qrCode: qrDataUrl });
       emitToClient(clientId, 'qr', { clientId, qr: qrDataUrl });
-    } catch (e) { console.error(`QR error for ${clientId}:`, e); }
+      meta.lastHandledAt = Date.now();
+    } catch (e) {
+      console.error(`QR error for ${clientId}:`, e);
+    } finally {
+      meta.handling = false;
+    }
   });
 
   wClient.on('ready', async () => {
     settleInit();
+    clearQrMeta(clientId);
     const phone = wClient.info?.wid?.user || '';
     console.log(`✅ Ready: ${clientId} (${phone})`);
     await WhatsAppClientModel.findOneAndUpdate(
@@ -253,6 +342,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 
   wClient.on('auth_failure', async (msg) => {
     settleInit();
+    clearQrMeta(clientId);
     console.error(`🔐 Auth failure for ${clientId}:`, msg);
     activeClients.delete(clientId);
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'auth_failure', qrCode: null });
@@ -269,6 +359,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 
   wClient.on('disconnected', async (reason) => {
     settleInit();
+    clearQrMeta(clientId);
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
@@ -313,6 +404,7 @@ const getClient         = (clientId) => activeClients.get(clientId);
 const isClientConnected = (clientId) => activeClients.has(clientId);
 
 const destroyClient = async (clientId) => {
+  clearQrMeta(clientId);
   const wClient = activeClients.get(clientId);
   if (wClient) {
     try { await wClient.destroy(); } catch (e) {
@@ -399,34 +491,46 @@ const initWhatsAppManager = async () => {
     const allClients = [...connected, ...inProgress, ...qrReady, ...authFailed];
     console.log(`🔄 Restoring ${allClients.length} WhatsApp client(s)...`);
 
-    for (const client of allClients) {
-      try {
-        const { clientId, status } = client;
+    const restoreOne = async (client) => {
+      const { clientId, status } = client;
 
-        if (status === 'auth_failure') {
-          console.log(`🔐 ${clientId}: auth_failure → clearing session, fresh QR`);
-          clearClientSessionData(clientId);
-          await createWhatsAppClient(clientId, { forceReauth: true });
+      if (status === 'auth_failure') {
+        console.log(`🔐 ${clientId}: auth_failure → clearing session, fresh QR`);
+        clearClientSessionData(clientId);
+        await createWhatsAppClient(clientId, { forceReauth: true });
+        return;
+      }
 
-        } else if (status === 'connected' && !sessionExistsOnDisk(clientId)) {
-          console.log(`⚠️  ${clientId}: was connected but session missing on disk → fresh QR`);
-          await createWhatsAppClient(clientId, { sessionMissing: true });
+      if (status === 'connected' && !sessionExistsOnDisk(clientId)) {
+        console.log(`⚠️  ${clientId}: was connected but session missing on disk → fresh QR`);
+        await createWhatsAppClient(clientId, { sessionMissing: true });
+        return;
+      }
 
-        } else if (status === 'connected') {
-          console.log(`✅ ${clientId}: session found on disk → restoring silently (no QR needed)`);
-          await createWhatsAppClient(clientId);
+      if (status === 'connected') {
+        console.log(`✅ ${clientId}: session found on disk → restoring silently (no QR needed)`);
+        await createWhatsAppClient(clientId);
+        return;
+      }
 
-        } else {
-          // initializing / qr_ready — these never finished, restart cleanly
-          console.log(`🔁 ${clientId}: was "${status}" → restarting for fresh QR`);
-          clearChromiumLocks(clientId);
-          await createWhatsAppClient(clientId);
+      // initializing / qr_ready — these never finished, restart cleanly
+      console.log(`🔁 ${clientId}: was "${status}" → restarting for fresh QR`);
+      clearChromiumLocks(clientId);
+      await createWhatsAppClient(clientId);
+    };
+
+    const batchSize = getRestoreBatchSize();
+    for (let i = 0; i < allClients.length; i += batchSize) {
+      const batch = allClients.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map(async (client) => {
+        try {
+          await restoreOne(client);
+        } catch (err) {
+          console.error(`Error restoring ${client.clientId}:`, err);
         }
-
-        // Stagger client starts to avoid CPU/RAM spike
-        await new Promise(r => setTimeout(r, 2500));
-      } catch (err) {
-        console.error(`Error restoring ${client.clientId}:`, err);
+      }));
+      if (i + batchSize < allClients.length) {
+        await new Promise((r) => setTimeout(r, getRestoreBatchDelayMs()));
       }
     }
 
