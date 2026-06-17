@@ -18,12 +18,13 @@ const parseEnvInt = (key, fallback) => {
   return Number.isFinite(v) ? v : fallback;
 };
 const getInitTimeoutMs        = () => parseEnvInt('WA_INIT_TIMEOUT_MS',              180000);
-const getInitMaxRetries       = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES',  3));
+const getInitMaxRetries       = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRIES',  1));
 const getRetryBaseDelayMs     = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
 const getRetryMaxDelayMs      = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
 const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE_MS', 20000));
-const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 900000));
-const getQrMaxRefreshes       = () => Math.max(10, parseEnvInt('WA_QR_MAX_REFRESHES', 60));
+// Backup safety net — primary stop is WA_QR_MAX_REFRESHES (default: first QR + one retry).
+const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 180000));
+const getQrMaxRefreshes       = () => Math.max(1, parseEnvInt('WA_QR_MAX_REFRESHES', 2));
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 const getLockRetryDelayMs     = () => Math.max(500, parseEnvInt('WA_LOCK_RETRY_DELAY_MS', 2000));
@@ -254,6 +255,11 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
       '--disable-gpu', '--disable-extensions', '--disable-background-networking',
+      '--disable-sync', '--mute-audio', '--disable-default-apps',
+      '--disable-translate', '--disable-component-update',
+      '--renderer-process-limit=1',
+      '--disk-cache-size=33554432', '--media-cache-size=33554432',
+      '--js-flags=--max-old-space-size=256',
     ],
   };
   if (chromePath) {
@@ -335,6 +341,9 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     startQrPendingTimer(clientId);
 
     if (meta.refreshCount > getQrMaxRefreshes()) {
+      console.warn(
+        `⏹️  ${clientId}: QR limit reached (${meta.refreshCount}/${getQrMaxRefreshes()}) — stopping Chromium`
+      );
       await releaseQrPendingClient(clientId, `${meta.refreshCount} refreshes without scan`);
       return;
     }
@@ -382,16 +391,9 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     clearQrMeta(clientId);
     console.error(`🔐 Auth failure for ${clientId}:`, msg);
     activeClients.delete(clientId);
+    try { await wClient.destroy(); } catch (_) {}
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'auth_failure', qrCode: null });
     emitToClient(clientId, 'auth_failure', { clientId, message: msg });
-    // Auto-recover: wipe corrupted session → generate fresh QR
-    console.log(`🔄 Auto-recovering ${clientId} after auth_failure...`);
-    clearClientSessionData(clientId);
-    setTimeout(() =>
-      createWhatsAppClient(clientId, { forceReauth: true }).catch(e =>
-        console.error(`Auth-failure recovery failed for ${clientId}:`, e)
-      ), 3000
-    );
   });
 
   wClient.on('disconnected', async (reason) => {
@@ -526,70 +528,89 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
 };
 
 /**
- * Called on server startup. Restores all previously active sessions.
+ * Called on server startup. Restores only saved connected sessions.
  *
- * Decision table:
- * ┌─────────────────────────────────────┬───────────────────────────────────┐
- * │ DB status                           │ Action                            │
- * ├─────────────────────────────────────┼───────────────────────────────────┤
- * │ connected  + session on disk        │ clearLocks → silent reconnect     │
- * │ connected  + NO session on disk     │ clearData  → fresh QR             │
- * │ qr_ready / initializing             │ clearLocks → restart (new QR)     │
- * │ auth_failure                        │ clearData  → fresh QR             │
- * └─────────────────────────────────────┴───────────────────────────────────┘
- *
- * NOTE: Uses separate queries per status group instead of $in, because the
- * WhatsAppClient model's buildFilter only supports plain string equality for
- * the status field.  The $in support was added to the model as well, but these
- * explicit queries make the restore logic self-contained and safe regardless.
+ * Clients stuck in initializing / qr_ready / auth_failure are marked disconnected
+ * so Chromium is not started for un-scanned or failed clients (saves RAM on boot).
  */
 const initWhatsAppManager = async () => {
   try {
-    // Fetch each group separately — safe even without $in support in the model
-    const [connected, inProgress, authFailed] = await Promise.all([
+    const [connected, inProgress, authFailed, qrReady] = await Promise.all([
       WhatsAppClientModel.find({ status: 'connected',    isActive: true }),
       WhatsAppClientModel.find({ status: 'initializing', isActive: true }),
       WhatsAppClientModel.find({ status: 'auth_failure', isActive: true }),
+      WhatsAppClientModel.find({ status: 'qr_ready',     isActive: true }),
     ]);
-    // qr_ready clients also need a restart
-    const qrReady = await WhatsAppClientModel.find({ status: 'qr_ready', isActive: true });
 
-    const restorePriority = { connected: 0, initializing: 1, qr_ready: 2, auth_failure: 3 };
-    const allClients = [...connected, ...inProgress, ...qrReady, ...authFailed]
-      .sort((a, b) => (restorePriority[a.status] ?? 9) - (restorePriority[b.status] ?? 9));
-    console.log(`🔄 Restoring ${allClients.length} WhatsApp client(s) (one at a time)...`);
+    const stuckClients = [...inProgress, ...qrReady, ...authFailed];
+    if (stuckClients.length) {
+      console.log(
+        `⏭️  Skipping ${stuckClients.length} stuck client(s) on boot (initializing/qr_ready/auth_failure) — reconnect manually from dashboard`
+      );
+      await Promise.allSettled(
+        stuckClients.map((c) =>
+          WhatsAppClientModel.findOneAndUpdate(
+            { clientId: c.clientId },
+            { status: 'disconnected', qrCode: null }
+          )
+        )
+      );
+    }
+
+    const seenPhones = new Map();
+    const toRestore = [];
+    const duplicateConnected = [];
+
+    for (const client of connected) {
+      const phone = normalizePhone(client.phone);
+      if (!phone) {
+        toRestore.push(client);
+        continue;
+      }
+      if (seenPhones.has(phone)) {
+        duplicateConnected.push(client);
+        continue;
+      }
+      seenPhones.set(phone, client);
+      toRestore.push(client);
+    }
+
+    if (duplicateConnected.length) {
+      console.log(
+        `⏭️  Skipping ${duplicateConnected.length} duplicate connected client(s) — same phone already assigned`
+      );
+      await Promise.allSettled(
+        duplicateConnected.map((c) =>
+          WhatsAppClientModel.findOneAndUpdate(
+            { clientId: c.clientId },
+            { status: 'disconnected', qrCode: null, phone: '' }
+          )
+        )
+      );
+    }
+
+    console.log(`🔄 Restoring ${toRestore.length} connected WhatsApp client(s) (one at a time)...`);
 
     const restoreOne = async (client) => {
-      const { clientId, status } = client;
+      const { clientId } = client;
 
-      if (status === 'auth_failure') {
-        console.log(`🔐 ${clientId}: auth_failure → clearing session, fresh QR`);
-        clearClientSessionData(clientId);
-        await createWhatsAppClient(clientId, { forceReauth: true });
+      if (!sessionExistsOnDisk(clientId)) {
+        console.log(`⚠️  ${clientId}: was connected but session missing on disk → skipped (reconnect manually)`);
+        await WhatsAppClientModel.findOneAndUpdate(
+          { clientId },
+          { status: 'disconnected', qrCode: null, phone: '' }
+        );
         return;
       }
 
-      if (status === 'connected' && !sessionExistsOnDisk(clientId)) {
-        console.log(`⚠️  ${clientId}: was connected but session missing on disk → fresh QR`);
-        await createWhatsAppClient(clientId, { sessionMissing: true });
-        return;
-      }
-
-      if (status === 'connected') {
-        console.log(`✅ ${clientId}: session found on disk → restoring silently (no QR needed)`);
-        await createWhatsAppClient(clientId);
-        return;
-      }
-
-      // initializing / qr_ready — these never finished, restart cleanly
-      console.log(`🔁 ${clientId}: was "${status}" → restarting for fresh QR`);
+      console.log(`✅ ${clientId}: session found on disk → restoring silently`);
       clearChromiumLocks(clientId);
       await createWhatsAppClient(clientId);
     };
 
     const batchSize = getRestoreBatchSize();
-    for (let i = 0; i < allClients.length; i += batchSize) {
-      const batch = allClients.slice(i, i + batchSize);
+    for (let i = 0; i < toRestore.length; i += batchSize) {
+      const batch = toRestore.slice(i, i + batchSize);
       await Promise.allSettled(batch.map(async (client) => {
         try {
           await restoreOne(client);
@@ -597,7 +618,7 @@ const initWhatsAppManager = async () => {
           console.error(`Error restoring ${client.clientId}:`, err);
         }
       }));
-      if (i + batchSize < allClients.length) {
+      if (i + batchSize < toRestore.length) {
         await new Promise((r) => setTimeout(r, getRestoreBatchDelayMs()));
       }
     }

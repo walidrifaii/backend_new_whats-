@@ -139,8 +139,12 @@ app.get('/public/qr/:clientId.png', async (req, res) => {
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
   socket.on('join-client-room', (clientId) => {
+    if (!clientId) return;
     socket.join(`client-${clientId}`);
-    console.log(`Socket ${socket.id} joined room client-${clientId}`);
+  });
+  socket.on('leave-client-room', (clientId) => {
+    if (!clientId) return;
+    socket.leave(`client-${clientId}`);
   });
   socket.on('disconnect', () => {
     console.log(`Socket disconnected: ${socket.id}`);
