@@ -24,8 +24,9 @@ const getRetryMaxDelayMs      = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_
 const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE_MS', 20000));
 const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 900000));
 const getQrMaxRefreshes       = () => Math.max(10, parseEnvInt('WA_QR_MAX_REFRESHES', 60));
-const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 2));
+const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
+const getLockRetryDelayMs     = () => Math.max(500, parseEnvInt('WA_LOCK_RETRY_DELAY_MS', 2000));
 
 // ─── Sessions directory ───────────────────────────────────────────────────────
 // On a VPS: defaults to <project-root>/sessions — a persistent directory.
@@ -88,18 +89,41 @@ const clearChromiumLocks = (clientId) => {
   const profileDir = getProfileDir(clientId);
   if (!fs.existsSync(profileDir)) return;
 
-  const searchDirs = [profileDir, path.join(profileDir, 'Default')];
-  for (const dir of searchDirs) {
-    if (!fs.existsSync(dir)) continue;
-    for (const f of LOCK_FILES) {
-      const p = path.join(dir, f);
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+
+    for (const ent of entries) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(p);
+        continue;
+      }
+      if (!LOCK_FILES.includes(ent.name)) continue;
       try {
-        fs.lstatSync(p);          // catches dangling symlinks
+        fs.lstatSync(p);
         fs.rmSync(p, { force: true });
         console.log(`🔓 Removed lock: ${p}`);
       } catch (_) { /* doesn't exist — fine */ }
     }
-  }
+  };
+
+  walk(profileDir);
+};
+
+const normalizePhone = (phone) => String(phone || '').replace(/\D/g, '');
+
+const isProfileLockError = (err) => {
+  const msg = (err?.message || '').toLowerCase();
+  return (
+    msg.includes('profile appears to be') ||
+    msg.includes('singleton')             ||
+    msg.includes('code: 21')
+  );
 };
 
 /** Completely wipes session data. Only used for forceReauth / sessionMissing. */
@@ -263,13 +287,19 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     const canRetry = attempt <= maxRetries && (timedOut || isRetryableError(err));
 
     if (canRetry) {
-      const delay       = getRetryDelayMs(attempt);
+      const lockError   = !timedOut && isProfileLockError(err);
+      const delay       = lockError ? getLockRetryDelayMs() : getRetryDelayMs(attempt);
       const nextAttempt = attempt + 1;
-      console.warn(`♻️  Retrying ${clientId} in ${delay}ms (${nextAttempt}/${maxRetries + 1})`);
+      const reason      = timedOut ? 'timeout' : (err?.message || 'error');
+      console.warn(
+        `♻️  Retrying ${clientId} in ${delay}ms (${nextAttempt}/${maxRetries + 1})` +
+        (lockError ? ' [profile lock]' : '')
+      );
+      clearChromiumLocks(clientId);
       await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing', qrCode: null });
       emitToClient(clientId, 'init_retry', {
         clientId, attempt: nextAttempt, maxAttempts: maxRetries + 1,
-        retryInMs: delay, reason: timedOut ? 'timeout' : (err?.message || 'error'),
+        retryInMs: delay, reason,
       });
       setTimeout(() => {
         clearChromiumLocks(clientId);
@@ -309,6 +339,12 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
       return;
     }
 
+    if (meta.refreshCount === 1 && sessionExistsOnDisk(clientId)) {
+      console.warn(
+        `⚠️  ${clientId}: QR despite saved session — auth may be expired or another client uses this number`
+      );
+    }
+
     const now = Date.now();
     if (meta.handling || (meta.refreshCount > 1 && now - meta.lastHandledAt < getQrThrottleMs())) {
       return;
@@ -333,6 +369,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     clearQrMeta(clientId);
     const phone = wClient.info?.wid?.user || '';
     console.log(`✅ Ready: ${clientId} (${phone})`);
+    await disconnectDuplicatePhoneClients(clientId, phone);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
       { status: 'connected', qrCode: null, phone, lastConnected: new Date() }
@@ -388,6 +425,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     } catch (e) { console.error('Error saving incoming message:', e); }
   });
 
+  clearChromiumLocks(clientId);
   await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing' });
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
@@ -412,7 +450,35 @@ const destroyClient = async (clientId) => {
     }
     activeClients.delete(clientId);
   }
+  clearChromiumLocks(clientId);
   await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
+};
+
+/** One WhatsApp number must not stay active on multiple clients (causes QR / takeover loops). */
+const disconnectDuplicatePhoneClients = async (clientId, phone) => {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return;
+
+  const connected = await WhatsAppClientModel.find({ status: 'connected', isActive: true });
+  for (const other of connected) {
+    if (other.clientId === clientId) continue;
+    if (normalizePhone(other.phone) !== normalized) continue;
+
+    console.warn(
+      `⚠️  Phone ${normalized} is active on ${clientId}; disconnecting duplicate ${other.clientId}`
+    );
+    await destroyClient(other.clientId);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId: other.clientId },
+      { status: 'disconnected', qrCode: null, phone: '' }
+    );
+    emitToClient(other.clientId, 'phone_conflict', {
+      clientId: other.clientId,
+      phone: normalized,
+      activeClientId: clientId,
+      message: 'This WhatsApp number is now active on another client.',
+    });
+  }
 };
 
 /**
@@ -488,8 +554,10 @@ const initWhatsAppManager = async () => {
     // qr_ready clients also need a restart
     const qrReady = await WhatsAppClientModel.find({ status: 'qr_ready', isActive: true });
 
-    const allClients = [...connected, ...inProgress, ...qrReady, ...authFailed];
-    console.log(`🔄 Restoring ${allClients.length} WhatsApp client(s)...`);
+    const restorePriority = { connected: 0, initializing: 1, qr_ready: 2, auth_failure: 3 };
+    const allClients = [...connected, ...inProgress, ...qrReady, ...authFailed]
+      .sort((a, b) => (restorePriority[a.status] ?? 9) - (restorePriority[b.status] ?? 9));
+    console.log(`🔄 Restoring ${allClients.length} WhatsApp client(s) (one at a time)...`);
 
     const restoreOne = async (client) => {
       const { clientId, status } = client;

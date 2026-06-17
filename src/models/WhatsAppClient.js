@@ -40,6 +40,10 @@ const buildFilter = (filter = {}) => {
     clauses.push('client_id = ?');
     values.push(String(filter.clientId));
   }
+  if (filter.phone !== undefined) {
+    clauses.push('phone = ?');
+    values.push(String(filter.phone));
+  }
   // Support both a plain string  { status: 'connected' }
   // and a $in array              { status: { $in: ['connected', 'qr_ready'] } }
   if (filter.status !== undefined) {
