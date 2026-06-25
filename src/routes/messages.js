@@ -67,7 +67,6 @@ const formatJobResponse = (job) => ({
   pending: job.pendingCount,
   message: job.message,
   mediaUrl: job.mediaUrl,
-  spreadHours: job.spreadHours,
   estimatedMinutes:
     job.totalCount > 1 && job.minDelay
       ? Math.ceil(((job.totalCount - 1) * job.minDelay) / 60000)
@@ -108,7 +107,6 @@ router.post('/send-bulk/preview', authMiddleware, async (req, res) => {
 
     res.json({
       total: phoneList.length,
-      spreadHours: safeSpreadHours,
       ...preview,
       itemSchedule: itemSchedule.map((row, index) => ({
         index: index + 1,
@@ -233,7 +231,6 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       jobId: job._id,
       total: phoneList.length,
       status: 'running',
-      spreadHours: safeSpreadHours,
       estimatedMinutes: estimateTotalMinutes(phoneList.length, safeSpreadHours),
       ...(schedule.warning ? { warning: schedule.warning } : {})
     });
