@@ -19,7 +19,9 @@ const User                = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
+const MessageJob = require('./models/MessageJob');
 const { initWhatsAppManager, destroyAllClients } = require('./services/whatsappManager');
+const { resumeInterruptedJobs } = require('./services/messageJobQueue');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -191,6 +193,7 @@ testConnection()
     if (!ok) throw new Error('MySQL ping failed');
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
+    await MessageJob.ensureTables();
     console.log('✅ MySQL connected');
 
     server.listen(process.env.PORT || 5000, () => {
@@ -199,6 +202,9 @@ testConnection()
 
     // Start WhatsApp restore after server is listening
     initWhatsAppManager();
+    resumeInterruptedJobs().catch((err) => {
+      console.warn('Could not resume interrupted bulk jobs:', err.message);
+    });
   })
   .catch(err => {
     console.error('❌ MySQL connection error:', err);

@@ -121,3 +121,54 @@ CREATE TABLE IF NOT EXISTS message_logs (
     FOREIGN KEY (contact_id) REFERENCES contacts (id)
     ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS message_jobs (
+  id CHAR(24) NOT NULL,
+  user_id CHAR(24) NOT NULL,
+  client_id CHAR(24) NOT NULL,
+  message TEXT NOT NULL,
+  media_url VARCHAR(2048) NULL,
+  status ENUM('queued', 'running', 'completed', 'failed', 'cancelled')
+    NOT NULL DEFAULT 'queued',
+  min_delay INT NOT NULL DEFAULT 20000,
+  max_delay INT NOT NULL DEFAULT 30000,
+  total_count INT NOT NULL DEFAULT 0,
+  sent_count INT NOT NULL DEFAULT 0,
+  failed_count INT NOT NULL DEFAULT 0,
+  pending_count INT NOT NULL DEFAULT 0,
+  started_at DATETIME NULL,
+  completed_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_message_jobs_user_id (user_id),
+  KEY idx_message_jobs_client_id (client_id),
+  KEY idx_message_jobs_status (status),
+  CONSTRAINT fk_message_jobs_user
+    FOREIGN KEY (user_id) REFERENCES users (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_message_jobs_client
+    FOREIGN KEY (client_id) REFERENCES whatsapp_clients (id)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS message_job_items (
+  id CHAR(24) NOT NULL,
+  job_id CHAR(24) NOT NULL,
+  user_id CHAR(24) NOT NULL,
+  phone VARCHAR(40) NOT NULL,
+  status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
+  whatsapp_message_id VARCHAR(255) NULL,
+  error TEXT NULL,
+  sent_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_message_job_items_job_status (job_id, status),
+  KEY idx_message_job_items_user_id (user_id),
+  CONSTRAINT fk_message_job_items_job
+    FOREIGN KEY (job_id) REFERENCES message_jobs (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_message_job_items_user
+    FOREIGN KEY (user_id) REFERENCES users (id)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
