@@ -96,17 +96,21 @@ class MessageJobItemModel {
     return rows[0]?.total || 0;
   }
 
-  static async findNextDue(jobId) {
+  static async findEarliestPending(jobId) {
     const rows = await query(
       `SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
        FROM message_job_items
        WHERE job_id = ? AND status = 'pending'
-         AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-       ORDER BY scheduled_at ASC, created_at ASC
+       ORDER BY COALESCE(scheduled_at, created_at) ASC, created_at ASC
        LIMIT 1`,
       [String(jobId)]
     );
     return mapRow(rows[0]);
+  }
+
+  /** @deprecated use findEarliestPending — kept for compatibility */
+  static async findNextDue(jobId) {
+    return this.findEarliestPending(jobId);
   }
 
   static async findNextScheduledAt(jobId) {
@@ -132,6 +136,11 @@ class MessageJobItemModel {
       const id = generateObjectId();
       ids.push(id);
       placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+      const scheduledAt = item.scheduledAt
+        ? (item.scheduledAt instanceof Date
+          ? item.scheduledAt
+          : new Date(item.scheduledAt))
+        : null;
       values.push(
         id,
         item.jobId,
@@ -140,7 +149,7 @@ class MessageJobItemModel {
         item.status || 'pending',
         item.whatsappMessageId || null,
         item.error || null,
-        item.scheduledAt || null,
+        scheduledAt,
         item.sentAt || null
       );
     });

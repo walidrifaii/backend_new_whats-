@@ -39,17 +39,13 @@ const failPendingItems = async (jobId, reason) => {
   );
 };
 
-const waitUntilNextDue = async (jobId) => {
-  const nextAt = await MessageJobItem.findNextScheduledAt(jobId);
-  if (!nextAt) return false;
-
-  const waitMs = Math.max(0, new Date(nextAt).getTime() - Date.now());
-  if (waitMs <= 0) return true;
-
+const waitForItemSchedule = async (item) => {
+  if (!item?.scheduledAt) return;
+  const waitMs = new Date(item.scheduledAt).getTime() - Date.now();
+  if (waitMs <= 0) return;
   const chunk = Math.min(waitMs, POLL_MS);
-  console.log(`⏳ Bulk job ${jobId}: next send in ${Math.ceil(waitMs / 1000)}s`);
+  console.log(`⏳ Next send for ${item.phone} in ${Math.ceil(waitMs / 1000)}s`);
   await sleep(chunk);
-  return true;
 };
 
 const processMessageJob = async (jobId) => {
@@ -105,13 +101,15 @@ const processMessageJob = async (jobId) => {
       break;
     }
 
-    const item = await MessageJobItem.findNextDue(jobId);
-    if (!item) {
-      const hasPending = await MessageJobItem.countDocuments({ jobId, status: 'pending' });
-      if (!hasPending) break;
-      const shouldContinue = await waitUntilNextDue(jobId);
-      if (!shouldContinue) break;
-      continue;
+    const item = await MessageJobItem.findEarliestPending(jobId);
+    if (!item) break;
+
+    if (item.scheduledAt) {
+      const waitMs = new Date(item.scheduledAt).getTime() - Date.now();
+      if (waitMs > 500) {
+        await waitForItemSchedule(item);
+        continue;
+      }
     }
 
     const userBalance = await User.getBalance(job.userId);

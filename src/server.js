@@ -200,11 +200,18 @@ testConnection()
       console.log(`🚀 Server running on port ${process.env.PORT || 5000}`);
     });
 
-    // Start WhatsApp restore after server is listening
-    initWhatsAppManager();
-    resumeInterruptedJobs().catch((err) => {
-      console.warn('Could not resume interrupted bulk jobs:', err.message);
-    });
+    // Start WhatsApp restore after server is listening, then resume bulk jobs
+    initWhatsAppManager()
+      .then(() => {
+        setTimeout(() => {
+          resumeInterruptedJobs().catch((err) => {
+            console.warn('Could not resume interrupted bulk jobs:', err.message);
+          });
+        }, 15000);
+      })
+      .catch((err) => {
+        console.error('WhatsApp manager init error:', err);
+      });
   })
   .catch(err => {
     console.error('❌ MySQL connection error:', err);
