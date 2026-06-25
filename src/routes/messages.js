@@ -13,6 +13,7 @@ const {
   calculateBulkSchedule,
   buildItemSchedule,
   estimateCompletionAt,
+  estimateTotalMinutes,
   DEFAULT_SPREAD_HOURS
 } = require('../utils/bulkSchedule');
 const authMiddleware = require('../middleware/auth');
@@ -67,7 +68,10 @@ const formatJobResponse = (job) => ({
   message: job.message,
   mediaUrl: job.mediaUrl,
   spreadHours: job.spreadHours,
-  estimatedCompletedAt: job.estimatedCompletedAt,
+  estimatedMinutes:
+    job.totalCount > 1 && job.minDelay
+      ? Math.ceil(((job.totalCount - 1) * job.minDelay) / 60000)
+      : 0,
   startedAt: job.startedAt,
   completedAt: job.completedAt,
   createdAt: job.createdAt
@@ -75,9 +79,8 @@ const formatJobResponse = (job) => ({
 
 const buildSchedulePayload = (phoneCount, spreadHours) => {
   const schedule = calculateBulkSchedule(phoneCount, spreadHours);
-  const startAt = new Date();
   return {
-    estimatedCompletedAt: estimateCompletionAt(phoneCount, schedule.delayBetweenMessagesMs, startAt),
+    estimatedMinutes: estimateTotalMinutes(phoneCount, spreadHours),
     ...(schedule.warning ? { warning: schedule.warning } : {})
   };
 };
@@ -231,7 +234,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       total: phoneList.length,
       status: 'running',
       spreadHours: safeSpreadHours,
-      estimatedCompletedAt,
+      estimatedMinutes: estimateTotalMinutes(phoneList.length, safeSpreadHours),
       ...(schedule.warning ? { warning: schedule.warning } : {})
     });
   } catch (err) {

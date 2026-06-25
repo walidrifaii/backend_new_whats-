@@ -118,6 +118,11 @@ const estimateCompletionAt = (phoneCount, delayMs, startAt = new Date()) => {
   return new Date(base + delayMs * (count - 1));
 };
 
+const estimateTotalMinutes = (phoneCount, spreadHours = DEFAULT_SPREAD_HOURS) => {
+  const schedule = calculateBulkSchedule(phoneCount, spreadHours);
+  return Math.ceil(schedule.estimatedTotalMs / 60000);
+};
+
 module.exports = {
   DEFAULT_SPREAD_HOURS,
   MAX_BULK_PHONES,
@@ -125,5 +130,6 @@ module.exports = {
   calculateBulkSchedule,
   buildItemSchedule,
   estimateCompletionAt,
+  estimateTotalMinutes,
   formatDuration
 };
