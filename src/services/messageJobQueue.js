@@ -3,7 +3,7 @@ const MessageJobItem = require('../models/MessageJobItem');
 const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
-const { sendMessage, isClientConnected } = require('./whatsappManager');
+const { sendMessage, isClientConnected, waitForClientReady } = require('./whatsappManager');
 const { normalizePhone, sleep } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
@@ -81,6 +81,18 @@ const processMessageJob = async (jobId) => {
   console.log(
     `🚀 Bulk job ${jobId} via ${sessionClientId} — fixed delay ${job.minDelay}ms, spread ${job.spreadHours}h`
   );
+
+  try {
+    console.log(`⏳ Bulk job ${jobId}: waiting for WhatsApp client to be fully ready...`);
+    await waitForClientReady(sessionClientId);
+    console.log(`✅ Bulk job ${jobId}: WhatsApp client ready, starting sends`);
+  } catch (err) {
+    console.error(`⛔ Bulk job ${jobId}: client not ready — ${err.message}`);
+    await failPendingItems(jobId, err.message);
+    activeJobsByClient.delete(sessionClientId);
+    runningJobPromises.delete(jobId);
+    return;
+  }
 
   const sendOpts =
     job.mediaUrl && String(job.mediaUrl).trim()

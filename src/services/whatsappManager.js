@@ -30,6 +30,8 @@ const getQrMaxRefreshes       = () => Math.max(1, parseEnvInt('WA_QR_MAX_REFRESH
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 const getLockRetryDelayMs     = () => Math.max(500, parseEnvInt('WA_LOCK_RETRY_DELAY_MS', 2000));
+const getSendMaxRetries       = () => Math.max(1, parseEnvInt('WA_SEND_MAX_RETRIES', 4));
+const getSendReadyWaitMs      = () => Math.max(5000, parseEnvInt('WA_SEND_READY_WAIT_MS', 90000));
 
 // ─── Sessions directory ───────────────────────────────────────────────────────
 // On a VPS: defaults to <project-root>/sessions — a persistent directory.
@@ -55,6 +57,8 @@ const getChromePath = () =>
   process.env.PUPPETEER_EXECUTABLE_PATH ||
   process.env.CHROME_BIN ||
   resolveBundledChromePath();
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Session / lock helpers ───────────────────────────────────────────────────
 
@@ -523,38 +527,104 @@ const destroyAllClients = async () => {
   await Promise.allSettled(ids.map((id) => destroyClient(id, { preserveSession: true })));
 };
 
+const isRetryableSendError = (err) => {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return (
+    msg.includes('getchat') ||
+    msg.includes('not ready') ||
+    msg.includes('evaluation failed') ||
+    msg.includes('protocol error') ||
+    msg.includes('target closed') ||
+    msg.includes('session closed') ||
+    msg.includes('cannot read properties of undefined')
+  );
+};
+
+/** Wait until whatsapp-web.js reports CONNECTED and wid is available (avoids getChat races). */
+const waitForClientReady = async (clientId, maxWaitMs = null) => {
+  const deadline = Date.now() + (maxWaitMs ?? getSendReadyWaitMs());
+  let lastState = 'unknown';
+
+  while (Date.now() < deadline) {
+    const wClient = activeClients.get(clientId);
+    if (!wClient) {
+      throw new Error(`No active client for ${clientId}`);
+    }
+
+    if (wClient.info?.wid?.user) {
+      try {
+        const state = await wClient.getState();
+        lastState = state || lastState;
+        if (state === 'CONNECTED') {
+          return wClient;
+        }
+      } catch (err) {
+        lastState = err.message || lastState;
+      }
+    }
+
+    await sleep(1500);
+  }
+
+  throw new Error(
+    `WhatsApp client ${clientId} not ready for sending (last state: ${lastState})`
+  );
+};
+
 const sendMessage = async (clientId, phone, message, opts = null) => {
-  const wClient = activeClients.get(clientId);
-  if (!wClient) throw new Error(`No active client for ${clientId}`);
   const dbClient = await WhatsAppClientModel.findOne({ clientId });
   if (!dbClient || dbClient.status !== 'connected') {
     throw new Error(`Client ${clientId} is not connected`);
   }
-  const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-  let result;
 
+  const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const mediaUrl = opts?.mediaUrl && String(opts.mediaUrl).trim()
     ? String(opts.mediaUrl).trim()
     : null;
 
-  if (mediaUrl) {
+  const maxAttempts = getSendMaxRetries();
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
-      if (!media?.data) {
-        throw new Error('Media URL returned empty data');
+      const wClient = await waitForClientReady(
+        clientId,
+        attempt === 1 ? Math.min(15000, getSendReadyWaitMs()) : getSendReadyWaitMs()
+      );
+
+      let result;
+      if (mediaUrl) {
+        try {
+          const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
+          if (!media?.data) {
+            throw new Error('Media URL returned empty data');
+          }
+          result = await wClient.sendMessage(chatId, media, {
+            caption: message || ''
+          });
+        } catch (err) {
+          throw new Error(`Media send failed: ${err.message}`);
+        }
+      } else {
+        result = await wClient.sendMessage(chatId, message);
       }
-      result = await wClient.sendMessage(chatId, media, {
-        caption: message || ''
-      });
+
+      await WhatsAppClientModel.findOneAndUpdate({ clientId }, { $inc: { messagesSent: 1 } });
+      return result;
     } catch (err) {
-      throw new Error(`Media send failed: ${err.message}`);
+      lastError = err;
+      const retryable = isRetryableSendError(err) && !String(err.message || '').startsWith('Media send failed');
+      if (!retryable || attempt >= maxAttempts) {
+        throw err;
+      }
+      console.warn(
+        `⚠️ Send attempt ${attempt}/${maxAttempts} failed for ${clientId} → ${chatId}: ${err.message}`
+      );
+      await sleep(2000 * attempt);
     }
-  } else {
-    result = await wClient.sendMessage(chatId, message);
   }
 
-  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { $inc: { messagesSent: 1 } });
-  return result;
+  throw lastError;
 };
 
 /**
@@ -665,6 +735,7 @@ module.exports = {
   destroyClient,
   destroyAllClients,
   sendMessage,
+  waitForClientReady,
   initWhatsAppManager,
   isClientConnected,
   activeClients,
