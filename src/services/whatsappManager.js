@@ -29,6 +29,7 @@ const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING
 const getQrMaxRefreshes       = () => Math.max(1, parseEnvInt('WA_QR_MAX_REFRESHES', 2));
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
+const getBootRestoreDelayMs   = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 20000));
 const getLockRetryDelayMs     = () => Math.max(500, parseEnvInt('WA_LOCK_RETRY_DELAY_MS', 2000));
 const getSendMaxRetries       = () => Math.max(1, parseEnvInt('WA_SEND_MAX_RETRIES', 4));
 const getSendReadyWaitMs      = () => Math.max(5000, parseEnvInt('WA_SEND_READY_WAIT_MS', 90000));
@@ -42,6 +43,47 @@ const SESSIONS_DIR = process.env.SESSIONS_DIR
 
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 console.log(`📁 Sessions dir: ${SESSIONS_DIR}`);
+
+const RESTORE_MANIFEST_PATH = path.join(SESSIONS_DIR, '.restore-manifest.json');
+const RESTORE_MANIFEST_TTL_MS = 30 * 60 * 1000;
+
+const writeRestoreManifest = (clientIds) => {
+  if (!clientIds.length) return;
+  try {
+    fs.writeFileSync(
+      RESTORE_MANIFEST_PATH,
+      JSON.stringify({ at: Date.now(), clientIds: [...new Set(clientIds)] }),
+      'utf8'
+    );
+    console.log(`💾 Wrote restore manifest for ${clientIds.length} client(s)`);
+  } catch (e) {
+    console.warn('Could not write restore manifest:', e.message);
+  }
+};
+
+const readRestoreManifest = () => {
+  try {
+    if (!fs.existsSync(RESTORE_MANIFEST_PATH)) return null;
+    const data = JSON.parse(fs.readFileSync(RESTORE_MANIFEST_PATH, 'utf8'));
+    if (!data?.clientIds?.length || !data.at) return null;
+    if (Date.now() - data.at > RESTORE_MANIFEST_TTL_MS) return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+};
+
+const clearRestoreManifest = () => {
+  try {
+    if (fs.existsSync(RESTORE_MANIFEST_PATH)) fs.rmSync(RESTORE_MANIFEST_PATH, { force: true });
+  } catch (_) {}
+};
+
+const shouldKeepConnectedOnDisconnect = (clientId) => {
+  if (clientsPreservingSession.has(clientId)) return true;
+  const manifest = readRestoreManifest();
+  return Boolean(manifest?.clientIds?.includes(clientId));
+};
 
 // ─── Chrome path ──────────────────────────────────────────────────────────────
 const resolveBundledChromePath = () => {
@@ -74,8 +116,15 @@ const getProfileDir = (clientId) => {
  * A valid session exists when the "Default" sub-dir is present.
  * (It holds IndexedDB / cookies / WhatsApp auth keys.)
  */
-const sessionExistsOnDisk = (clientId) =>
-  fs.existsSync(path.join(getProfileDir(clientId), 'Default'));
+const sessionExistsOnDisk = (clientId) => {
+  const profileDir = getProfileDir(clientId);
+  if (fs.existsSync(path.join(profileDir, 'Default'))) return true;
+  if (fs.existsSync(path.join(profileDir, '.wwebjs_auth'))) return true;
+  const nested = path.join(SESSIONS_DIR, `session-${clientId}`);
+  if (fs.existsSync(path.join(nested, '.wwebjs_auth'))) return true;
+  if (fs.existsSync(path.join(nested, 'Default'))) return true;
+  return false;
+};
 
 /**
  * Removes ONLY the Chromium lock files left after an unclean shutdown.
@@ -233,7 +282,7 @@ const startQrPendingTimer = (clientId) => {
  * @param {number}  [opts.attempt=1]            – internal retry counter
  */
 const createWhatsAppClient = async (clientId, opts = {}) => {
-  const { forceReauth = false, sessionMissing = false, attempt = 1 } = opts;
+  const { forceReauth = false, sessionMissing = false, attempt = 1, restoring = false } = opts;
   const maxRetries = getInitMaxRetries();
 
   if (activeClients.has(clientId)) {
@@ -408,7 +457,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
 
-    if (clientsPreservingSession.has(clientId)) {
+    if (shouldKeepConnectedOnDisconnect(clientId)) {
       console.log(`💾 ${clientId}: deploy shutdown — keeping connected status for auto-restore`);
       return;
     }
@@ -440,7 +489,11 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   });
 
   clearChromiumLocks(clientId);
-  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing' });
+  if (restoring) {
+    await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'connected', qrCode: null });
+  } else {
+    await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing' });
+  }
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
     console.error(`Failed to init ${clientId}:`, err.message);
@@ -473,9 +526,12 @@ const destroyClient = async (clientId, options = {}) => {
 
   if (preserveSession) {
     const dbClient = await WhatsAppClientModel.findOne({ clientId });
-    if (dbClient && dbClient.status === 'connected') {
-      await WhatsAppClientModel.findOneAndUpdate({ clientId }, { qrCode: null });
-      console.log(`💾 ${clientId}: session preserved on disk (still connected in DB)`);
+    if (dbClient && (dbClient.status === 'connected' || dbClient.phone)) {
+      await WhatsAppClientModel.findOneAndUpdate(
+        { clientId },
+        { status: 'connected', qrCode: null }
+      );
+      console.log(`💾 ${clientId}: session preserved on disk (DB kept connected)`);
     } else if (dbClient) {
       await WhatsAppClientModel.findOneAndUpdate({ clientId }, { qrCode: null });
     }
@@ -519,12 +575,22 @@ const disconnectDuplicatePhoneClients = async (clientId, phone) => {
  * Preserves DB `connected` + session files so initWhatsAppManager can restore on boot.
  */
 const destroyAllClients = async () => {
-  const ids = [...activeClients.keys()];
+  const activeIds = [...activeClients.keys()];
+  const dbConnected = await WhatsAppClientModel.find({ status: 'connected', isActive: true });
+  const ids = [...new Set([
+    ...activeIds,
+    ...dbConnected.map((c) => c.clientId),
+  ])];
+
   if (!ids.length) return;
+
+  writeRestoreManifest(ids);
   console.log(
-    `🧹 Stopping ${ids.length} WhatsApp client(s) before shutdown (sessions preserved for restore)...`
+    `🧹 Stopping ${activeIds.length} active WhatsApp client(s) before shutdown (sessions preserved for restore)...`
   );
-  await Promise.allSettled(ids.map((id) => destroyClient(id, { preserveSession: true })));
+  if (activeIds.length) {
+    await Promise.allSettled(activeIds.map((id) => destroyClient(id, { preserveSession: true })));
+  }
 };
 
 const isRetryableSendError = (err) => {
@@ -635,14 +701,28 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
  */
 const initWhatsAppManager = async () => {
   try {
-    const [connected, inProgress, authFailed, qrReady] = await Promise.all([
+    const bootDelay = getBootRestoreDelayMs();
+    if (bootDelay > 0) {
+      console.log(
+        `⏳ Waiting ${bootDelay}ms before restoring WhatsApp (lets old container finish deploy shutdown)...`
+      );
+      await sleep(bootDelay);
+    }
+
+    const manifest = readRestoreManifest();
+    const manifestIds = new Set(manifest?.clientIds || []);
+
+    const [connected, inProgress, authFailed, qrReady, disconnected] = await Promise.all([
       WhatsAppClientModel.find({ status: 'connected',    isActive: true }),
       WhatsAppClientModel.find({ status: 'initializing', isActive: true }),
       WhatsAppClientModel.find({ status: 'auth_failure', isActive: true }),
       WhatsAppClientModel.find({ status: 'qr_ready',     isActive: true }),
+      WhatsAppClientModel.find({ status: 'disconnected', isActive: true }),
     ]);
 
-    const stuckClients = [...inProgress, ...qrReady, ...authFailed];
+    const stuckClients = [...inProgress, ...qrReady, ...authFailed].filter(
+      (c) => !manifestIds.has(c.clientId)
+    );
     if (stuckClients.length) {
       console.log(
         `⏭️  Skipping ${stuckClients.length} stuck client(s) on boot (initializing/qr_ready/auth_failure) — reconnect manually from dashboard`
@@ -657,11 +737,33 @@ const initWhatsAppManager = async () => {
       );
     }
 
+    const deployRecover = disconnected.filter(
+      (c) => manifestIds.has(c.clientId) && c.phone && sessionExistsOnDisk(c.clientId)
+    );
+    if (deployRecover.length) {
+      console.log(
+        `♻️  Recovering ${deployRecover.length} client(s) marked disconnected during deploy (manifest + session on disk)`
+      );
+      await Promise.allSettled(
+        deployRecover.map((c) =>
+          WhatsAppClientModel.findOneAndUpdate(
+            { clientId: c.clientId },
+            { status: 'connected', qrCode: null }
+          )
+        )
+      );
+    }
+
+    const allConnected = [
+      ...connected,
+      ...deployRecover.map((c) => ({ ...c, status: 'connected' })),
+    ];
+
     const seenPhones = new Map();
     const toRestore = [];
     const duplicateConnected = [];
 
-    for (const client of connected) {
+    for (const client of allConnected) {
       const phone = normalizePhone(client.phone);
       if (!phone) {
         toRestore.push(client);
@@ -696,6 +798,9 @@ const initWhatsAppManager = async () => {
 
       if (!sessionExistsOnDisk(clientId)) {
         console.log(`⚠️  ${clientId}: was connected but session missing on disk → skipped (reconnect manually)`);
+        console.warn(
+          `⚠️  ${clientId}: mount a persistent volume at ${SESSIONS_DIR} on your host (Easypanel → Volumes)`
+        );
         await WhatsAppClientModel.findOneAndUpdate(
           { clientId },
           { status: 'disconnected', qrCode: null, phone: '' }
@@ -703,9 +808,9 @@ const initWhatsAppManager = async () => {
         return;
       }
 
-      console.log(`✅ ${clientId}: session found on disk → restoring silently`);
+      console.log(`✅ ${clientId}: session found on disk → restoring silently (status stays connected)`);
       clearChromiumLocks(clientId);
-      await createWhatsAppClient(clientId);
+      await createWhatsAppClient(clientId, { restoring: true });
     };
 
     const batchSize = getRestoreBatchSize();
@@ -723,6 +828,7 @@ const initWhatsAppManager = async () => {
       }
     }
 
+    clearRestoreManifest();
     console.log('✅ WhatsApp manager ready.');
   } catch (err) {
     console.error('initWhatsAppManager error:', err);

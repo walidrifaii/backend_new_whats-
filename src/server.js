@@ -161,22 +161,24 @@ const gracefulShutdown = async (signal) => {
   isShuttingDown = true;
   console.log(`🛑 Received ${signal}. Preparing graceful shutdown (WhatsApp sessions will be restored on next boot)...`);
 
+  server.close(() => {
+    console.log('✅ HTTP server closed.');
+  });
+
   try {
     await destroyAllClients();
   } catch (err) {
     console.error('Error while destroying WhatsApp clients:', err.message);
   }
 
-  server.close(() => {
-    console.log('✅ HTTP server closed. Exiting.');
-    process.exit(0);
-  });
+  console.log('✅ WhatsApp sessions preserved. Exiting.');
+  process.exit(0);
 
-  // Force exit after 15 s if something hangs
+  // Force exit after 30 s if something hangs
   setTimeout(() => {
     console.error('⚠️  Forced exit after timeout.');
     process.exit(1);
-  }, 15000).unref();
+  }, 30000).unref();
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
