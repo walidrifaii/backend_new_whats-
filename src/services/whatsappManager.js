@@ -8,6 +8,8 @@ const { emitToClient } = require('../utils/socket');
 
 // ─── Active clients map ───────────────────────────────────────────────────────
 const activeClients = new Map();
+/** Clients being stopped for deploy/restart — keep DB `connected` + session on disk */
+const clientsPreservingSession = new Set();
 
 // Per-client QR state — stuck unauthenticated clients keep Chromium alive and can OOM the server.
 const qrMeta = new Map();
@@ -401,6 +403,12 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     clearQrMeta(clientId);
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
+
+    if (clientsPreservingSession.has(clientId)) {
+      console.log(`💾 ${clientId}: deploy shutdown — keeping connected status for auto-restore`);
+      return;
+    }
+
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
     emitToClient(clientId, 'disconnected', { clientId, reason });
   });
@@ -443,7 +451,12 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 const getClient         = (clientId) => activeClients.get(clientId);
 const isClientConnected = (clientId) => activeClients.has(clientId);
 
-const destroyClient = async (clientId) => {
+const destroyClient = async (clientId, options = {}) => {
+  const preserveSession = options.preserveSession === true;
+  if (preserveSession) {
+    clientsPreservingSession.add(clientId);
+  }
+
   clearQrMeta(clientId);
   const wClient = activeClients.get(clientId);
   if (wClient) {
@@ -453,7 +466,21 @@ const destroyClient = async (clientId) => {
     activeClients.delete(clientId);
   }
   clearChromiumLocks(clientId);
-  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
+
+  if (preserveSession) {
+    const dbClient = await WhatsAppClientModel.findOne({ clientId });
+    if (dbClient && dbClient.status === 'connected') {
+      await WhatsAppClientModel.findOneAndUpdate({ clientId }, { qrCode: null });
+      console.log(`💾 ${clientId}: session preserved on disk (still connected in DB)`);
+    } else if (dbClient) {
+      await WhatsAppClientModel.findOneAndUpdate({ clientId }, { qrCode: null });
+    }
+    // Keep clientId in clientsPreservingSession until process exits so async
+    // `disconnected` events from wClient.destroy() do not mark DB disconnected.
+  } else {
+    clientsPreservingSession.delete(clientId);
+    await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
+  }
 };
 
 /** One WhatsApp number must not stay active on multiple clients (causes QR / takeover loops). */
@@ -484,13 +511,16 @@ const disconnectDuplicatePhoneClients = async (clientId, phone) => {
 };
 
 /**
- * Gracefully destroys all active clients.
- * Called from server.js on SIGTERM / SIGINT.
+ * Stops all in-memory WhatsApp clients (deploy / SIGTERM).
+ * Preserves DB `connected` + session files so initWhatsAppManager can restore on boot.
  */
 const destroyAllClients = async () => {
   const ids = [...activeClients.keys()];
-  console.log(`🧹 Destroying ${ids.length} active WhatsApp client(s) before shutdown...`);
-  await Promise.allSettled(ids.map(id => destroyClient(id)));
+  if (!ids.length) return;
+  console.log(
+    `🧹 Stopping ${ids.length} WhatsApp client(s) before shutdown (sessions preserved for restore)...`
+  );
+  await Promise.allSettled(ids.map((id) => destroyClient(id, { preserveSession: true })));
 };
 
 const sendMessage = async (clientId, phone, message, opts = null) => {

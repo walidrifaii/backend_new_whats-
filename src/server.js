@@ -159,7 +159,7 @@ let isShuttingDown = false;
 const gracefulShutdown = async (signal) => {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log(`🛑 Received ${signal}. Preparing graceful shutdown...`);
+  console.log(`🛑 Received ${signal}. Preparing graceful shutdown (WhatsApp sessions will be restored on next boot)...`);
 
   try {
     await destroyAllClients();
