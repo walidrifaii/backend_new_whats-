@@ -4,9 +4,11 @@ const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { sendMessage, isClientConnected } = require('./whatsappManager');
-const { normalizePhone, sleep, randomDelay } = require('../utils/helpers');
+const { normalizePhone, sleep } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
+
+const POLL_MS = Math.max(5000, parseInt(process.env.BULK_SCHEDULER_POLL_MS, 10) || 30000);
 
 const activeJobsByClient = new Map();
 const runningJobPromises = new Map();
@@ -35,6 +37,19 @@ const failPendingItems = async (jobId, reason) => {
     },
     { new: true }
   );
+};
+
+const waitUntilNextDue = async (jobId) => {
+  const nextAt = await MessageJobItem.findNextScheduledAt(jobId);
+  if (!nextAt) return false;
+
+  const waitMs = Math.max(0, new Date(nextAt).getTime() - Date.now());
+  if (waitMs <= 0) return true;
+
+  const chunk = Math.min(waitMs, POLL_MS);
+  console.log(`⏳ Bulk job ${jobId}: next send in ${Math.ceil(waitMs / 1000)}s`);
+  await sleep(chunk);
+  return true;
 };
 
 const processMessageJob = async (jobId) => {
@@ -67,7 +82,9 @@ const processMessageJob = async (jobId) => {
     startedAt: job.startedAt || new Date()
   });
 
-  console.log(`🚀 Starting bulk message job ${jobId} via client ${sessionClientId}`);
+  console.log(
+    `🚀 Bulk job ${jobId} via ${sessionClientId} — fixed delay ${job.minDelay}ms, spread ${job.spreadHours}h`
+  );
 
   const sendOpts =
     job.mediaUrl && String(job.mediaUrl).trim()
@@ -75,121 +92,107 @@ const processMessageJob = async (jobId) => {
       : null;
   const logText = buildLogText(job.message, job.mediaUrl);
 
-  let hasMore = true;
-
-  while (hasMore) {
+  while (true) {
     const freshJob = await MessageJob.findById(jobId);
     if (!freshJob || freshJob.status !== 'running') {
       console.log(`Bulk job ${jobId} is no longer running. Stopping.`);
       break;
     }
 
-    const items = await MessageJobItem.find(
-      { jobId, status: 'pending' },
-      { limit: 10 }
-    );
-
-    if (items.length === 0) {
-      hasMore = false;
+    if (!isClientConnected(sessionClientId)) {
+      const reason = 'WhatsApp session went offline during bulk job.';
+      await failPendingItems(jobId, reason);
       break;
     }
 
-    for (const item of items) {
-      const current = await MessageJob.findById(jobId);
-      if (!current || current.status !== 'running') {
-        console.log(`Bulk job ${jobId} stopped mid-send.`);
-        return;
-      }
+    const item = await MessageJobItem.findNextDue(jobId);
+    if (!item) {
+      const hasPending = await MessageJobItem.countDocuments({ jobId, status: 'pending' });
+      if (!hasPending) break;
+      const shouldContinue = await waitUntilNextDue(jobId);
+      if (!shouldContinue) break;
+      continue;
+    }
 
-      const userBalance = await User.getBalance(job.userId);
-      if (userBalance <= 0) {
-        console.log(`⛔ Bulk job ${jobId} stopped — insufficient message balance.`);
-        const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
-        await failPendingItems(jobId, reason);
-        emitToClient(sessionClientId, 'bulk-job-balance-exhausted', {
-          jobId,
-          message: 'You need to charge balance in message.'
-        });
+    const userBalance = await User.getBalance(job.userId);
+    if (userBalance <= 0) {
+      console.log(`⛔ Bulk job ${jobId} stopped — insufficient message balance.`);
+      const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
+      await failPendingItems(jobId, reason);
+      emitToClient(sessionClientId, 'bulk-job-balance-exhausted', {
+        jobId,
+        message: 'You need to charge balance in message.'
+      });
+      sendBalanceExhaustedEmail({
+        userId: job.userId,
+        email: jobOwner?.email,
+        name: jobOwner?.name
+      })
+        .then((result) => logBalanceEmailResult('bulk_job_blocked_zero', result, jobOwner?.email))
+        .catch((err) => logBalanceEmailResult('bulk_job_blocked_zero', { ok: false, reason: err.message }, jobOwner?.email));
+      break;
+    }
+
+    const phone = normalizePhone(item.phone);
+    let success = false;
+    let error = null;
+    let whatsappId = null;
+
+    try {
+      const result = await sendMessage(sessionClientId, phone, job.message || '', sendOpts);
+      whatsappId = result?.id?._serialized || null;
+      success = true;
+      console.log(`✅ Bulk job ${jobId}: sent to ${phone}`);
+    } catch (err) {
+      error = err.message;
+      console.error(`❌ Bulk job ${jobId}: failed to send to ${phone}:`, err.message);
+    }
+
+    if (success) {
+      await User.decrementBalance(job.userId, 1);
+      const updatedBalance = await User.getBalance(job.userId);
+      if (updatedBalance <= 0) {
         sendBalanceExhaustedEmail({
           userId: job.userId,
           email: jobOwner?.email,
           name: jobOwner?.name
         })
-          .then((result) => logBalanceEmailResult('bulk_job_blocked_zero', result, jobOwner?.email))
-          .catch((err) => logBalanceEmailResult('bulk_job_blocked_zero', { ok: false, reason: err.message }, jobOwner?.email));
-        return;
-      }
-
-      const phone = normalizePhone(item.phone);
-      let success = false;
-      let error = null;
-      let whatsappId = null;
-
-      try {
-        const result = await sendMessage(sessionClientId, phone, job.message || '', sendOpts);
-        whatsappId = result?.id?._serialized || null;
-        success = true;
-        console.log(`✅ Bulk job ${jobId}: sent to ${phone}`);
-      } catch (err) {
-        error = err.message;
-        console.error(`❌ Bulk job ${jobId}: failed to send to ${phone}:`, err.message);
-      }
-
-      if (success) {
-        await User.decrementBalance(job.userId, 1);
-        const updatedBalance = await User.getBalance(job.userId);
-        if (updatedBalance <= 0) {
-          sendBalanceExhaustedEmail({
-            userId: job.userId,
-            email: jobOwner?.email,
-            name: jobOwner?.name
-          })
-            .then((result) => logBalanceEmailResult('bulk_job_reached_zero', result, jobOwner?.email))
-            .catch((err) => logBalanceEmailResult('bulk_job_reached_zero', { ok: false, reason: err.message }, jobOwner?.email));
-        }
-      }
-
-      await MessageJobItem.findByIdAndUpdate(item._id, {
-        status: success ? 'sent' : 'failed',
-        sentAt: success ? new Date() : undefined,
-        error: error || undefined,
-        whatsappMessageId: whatsappId || undefined
-      });
-
-      await MessageLog.create({
-        userId: job.userId,
-        clientId: dbClient._id,
-        phone: item.phone,
-        message: logText,
-        direction: 'outgoing',
-        status: success ? 'sent' : 'failed',
-        whatsappMessageId: whatsappId,
-        error: error || undefined
-      });
-
-      const updateFields = success
-        ? { $inc: { sentCount: 1 } }
-        : { $inc: { failedCount: 1 } };
-      const updated = await MessageJob.findByIdAndUpdate(jobId, updateFields, { new: true });
-
-      emitToClient(sessionClientId, 'bulk-job-progress', {
-        jobId,
-        sentCount: updated.sentCount,
-        failedCount: updated.failedCount,
-        totalCount: updated.totalCount,
-        pendingCount: updated.pendingCount
-      });
-
-      const morePending = await MessageJobItem.countDocuments({ jobId, status: 'pending' });
-      if (morePending > 0) {
-        const delay = randomDelay(
-          job.minDelay || parseInt(process.env.MIN_DELAY_MS, 10) || 20000,
-          job.maxDelay || parseInt(process.env.MAX_DELAY_MS, 10) || 30000
-        );
-        console.log(`⏳ Bulk job ${jobId}: waiting ${delay}ms before next message...`);
-        await sleep(delay);
+          .then((result) => logBalanceEmailResult('bulk_job_reached_zero', result, jobOwner?.email))
+          .catch((err) => logBalanceEmailResult('bulk_job_reached_zero', { ok: false, reason: err.message }, jobOwner?.email));
       }
     }
+
+    await MessageJobItem.findByIdAndUpdate(item._id, {
+      status: success ? 'sent' : 'failed',
+      sentAt: success ? new Date() : undefined,
+      error: error || undefined,
+      whatsappMessageId: whatsappId || undefined
+    });
+
+    await MessageLog.create({
+      userId: job.userId,
+      clientId: dbClient._id,
+      phone: item.phone,
+      message: logText,
+      direction: 'outgoing',
+      status: success ? 'sent' : 'failed',
+      whatsappMessageId: whatsappId,
+      error: error || undefined
+    });
+
+    const updateFields = success
+      ? { $inc: { sentCount: 1 } }
+      : { $inc: { failedCount: 1 } };
+    const updated = await MessageJob.findByIdAndUpdate(jobId, updateFields, { new: true });
+
+    emitToClient(sessionClientId, 'bulk-job-progress', {
+      jobId,
+      sentCount: updated.sentCount,
+      failedCount: updated.failedCount,
+      totalCount: updated.totalCount,
+      pendingCount: updated.pendingCount,
+      estimatedCompletedAt: updated.estimatedCompletedAt
+    });
   }
 
   const finalJob = await MessageJob.findById(jobId);
@@ -248,11 +251,12 @@ const isClientSending = (sessionClientId) => activeJobsByClient.has(sessionClien
 const resumeInterruptedJobs = async () => {
   const { query } = require('../db/mysql');
   const jobs = await query(
-    `SELECT id FROM message_jobs WHERE status = 'running' ORDER BY created_at ASC`
+    `SELECT id FROM message_jobs WHERE status IN ('running', 'queued') ORDER BY created_at ASC`
   );
   if (!jobs.length) return;
 
   for (const row of jobs) {
+    if (runningJobPromises.has(row.id)) continue;
     await MessageJob.findByIdAndUpdate(row.id, { status: 'queued' });
     try {
       await startMessageJob(row.id);

@@ -12,6 +12,8 @@ const mapRow = (row) => {
     status: row.status,
     minDelay: row.min_delay,
     maxDelay: row.max_delay,
+    spreadHours: row.spread_hours,
+    estimatedCompletedAt: row.estimated_completed_at,
     totalCount: row.total_count,
     sentCount: row.sent_count,
     failedCount: row.failed_count,
@@ -56,6 +58,8 @@ const buildUpdate = (update = {}) => {
     status: 'status',
     minDelay: 'min_delay',
     maxDelay: 'max_delay',
+    spreadHours: 'spread_hours',
+    estimatedCompletedAt: 'estimated_completed_at',
     totalCount: 'total_count',
     sentCount: 'sent_count',
     failedCount: 'failed_count',
@@ -97,6 +101,8 @@ class MessageJobModel {
           NOT NULL DEFAULT 'queued',
         min_delay INT NOT NULL DEFAULT 20000,
         max_delay INT NOT NULL DEFAULT 30000,
+        spread_hours DECIMAL(8,2) NOT NULL DEFAULT 16,
+        estimated_completed_at DATETIME NULL,
         total_count INT NOT NULL DEFAULT 0,
         sent_count INT NOT NULL DEFAULT 0,
         failed_count INT NOT NULL DEFAULT 0,
@@ -127,11 +133,13 @@ class MessageJobModel {
         status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
         whatsapp_message_id VARCHAR(255) NULL,
         error TEXT NULL,
+        scheduled_at DATETIME NULL,
         sent_at DATETIME NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY idx_message_job_items_job_status (job_id, status),
         KEY idx_message_job_items_user_id (user_id),
+        KEY idx_message_job_items_scheduled (job_id, status, scheduled_at),
         CONSTRAINT fk_message_job_items_job
           FOREIGN KEY (job_id) REFERENCES message_jobs (id)
           ON DELETE CASCADE ON UPDATE CASCADE,
@@ -140,13 +148,35 @@ class MessageJobModel {
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+
+    await this.ensureExtraColumns();
+  }
+
+  static async ensureExtraColumns() {
+    const alters = [
+      `ALTER TABLE message_jobs ADD COLUMN spread_hours DECIMAL(8,2) NOT NULL DEFAULT 16`,
+      `ALTER TABLE message_jobs ADD COLUMN estimated_completed_at DATETIME NULL`
+    ];
+    for (const sql of alters) {
+      try {
+        await query(sql);
+      } catch (err) {
+        if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+          throw err;
+        }
+      }
+    }
+
+    const MessageJobItem = require('./MessageJobItem');
+    await MessageJobItem.ensureColumns();
   }
 
   static async findOne(filter = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
       SELECT id, user_id, client_id, message, media_url, status,
-             min_delay, max_delay, total_count, sent_count, failed_count,
+             min_delay, max_delay, spread_hours, estimated_completed_at,
+             total_count, sent_count, failed_count,
              pending_count, started_at, completed_at, created_at, updated_at
       FROM message_jobs
     `;
@@ -170,9 +200,10 @@ class MessageJobModel {
     await query(
       `INSERT INTO message_jobs (
         id, user_id, client_id, message, media_url, status,
-        min_delay, max_delay, total_count, sent_count, failed_count, pending_count,
+        min_delay, max_delay, spread_hours, estimated_completed_at,
+        total_count, sent_count, failed_count, pending_count,
         started_at, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
         String(data.userId),
@@ -182,6 +213,8 @@ class MessageJobModel {
         data.status || 'queued',
         data.minDelay ?? 20000,
         data.maxDelay ?? 30000,
+        data.spreadHours ?? 16,
+        data.estimatedCompletedAt || null,
         totalCount,
         sentCount,
         failedCount,

@@ -9,6 +9,12 @@ const { sendMessage, isClientConnected } = require('../services/whatsappManager'
 const { startMessageJob, isClientSending } = require('../services/messageJobQueue');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const { sanitizeMediaUrl, validateMediaUrlReachable } = require('../utils/campaignMedia');
+const {
+  calculateBulkSchedule,
+  buildItemSchedule,
+  estimateCompletionAt,
+  DEFAULT_SPREAD_HOURS
+} = require('../utils/bulkSchedule');
 const authMiddleware = require('../middleware/auth');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
@@ -60,11 +66,77 @@ const formatJobResponse = (job) => ({
   pending: job.pendingCount,
   message: job.message,
   mediaUrl: job.mediaUrl,
+  spreadHours: job.spreadHours,
+  delayBetweenMessagesMs: job.minDelay,
+  delayBetweenMessagesSeconds: job.minDelay ? Math.round(job.minDelay / 1000) : 0,
   minDelay: job.minDelay,
   maxDelay: job.maxDelay,
+  estimatedCompletedAt: job.estimatedCompletedAt,
   startedAt: job.startedAt,
   completedAt: job.completedAt,
   createdAt: job.createdAt
+});
+
+const buildSchedulePayload = (phoneCount, spreadHours) => {
+  const schedule = calculateBulkSchedule(phoneCount, spreadHours);
+  const startAt = new Date();
+  return {
+    schedule: {
+      phoneCount: schedule.phoneCount,
+      maxPhones: schedule.maxPhones,
+      spreadHours: schedule.spreadHours,
+      maxSpreadHours: schedule.maxSpreadHours,
+      delayBetweenMessagesMs: schedule.delayBetweenMessagesMs,
+      delayBetweenMessagesSeconds: schedule.delayBetweenMessagesSeconds,
+      minDelayMs: schedule.minDelayMs,
+      maxDelayMs: schedule.maxDelayMs,
+      estimatedTotalMs: schedule.estimatedTotalMs,
+      estimatedHours: schedule.estimatedHours,
+      estimatedDays: schedule.estimatedDays,
+      estimatedDuration: schedule.estimatedDuration,
+      maxTotalDurationAtMaxPhones: schedule.maxTotalDurationAtMaxPhones,
+      messagesPerHour: schedule.messagesPerHour,
+      spreadTargetMet: schedule.spreadTargetMet,
+      note: schedule.note,
+      ...(schedule.warning ? { warning: schedule.warning } : {})
+    },
+    estimatedCompletedAt: estimateCompletionAt(phoneCount, schedule.delayBetweenMessagesMs, startAt)
+  };
+};
+
+// POST /api/messages/send-bulk/preview - Estimate duration before sending
+router.post('/send-bulk/preview', authMiddleware, async (req, res) => {
+  try {
+    const { phones, spreadHours } = req.body;
+    const phoneList = normalizePhonesList(phones);
+    if (phoneList.length === 0) {
+      return res.status(400).json({ error: 'phones must be a non-empty array of valid numbers' });
+    }
+    if (phoneList.length > MAX_BULK_PHONES) {
+      return res.status(400).json({ error: `Maximum ${MAX_BULK_PHONES} phones per bulk job` });
+    }
+
+    const parsedSpread = spreadHours != null ? parseFloat(spreadHours) : DEFAULT_SPREAD_HOURS;
+    const safeSpreadHours = Number.isFinite(parsedSpread) && parsedSpread > 0
+      ? parsedSpread
+      : DEFAULT_SPREAD_HOURS;
+
+    const preview = buildSchedulePayload(phoneList.length, safeSpreadHours);
+    const itemSchedule = buildItemSchedule(phoneList, preview.schedule.delayBetweenMessagesMs);
+
+    res.json({
+      total: phoneList.length,
+      spreadHours: safeSpreadHours,
+      ...preview,
+      itemSchedule: itemSchedule.map((row, index) => ({
+        index: index + 1,
+        phone: row.phone,
+        scheduledAt: row.scheduledAt
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/messages/send-bulk - Same message (and optional media) to many phones
@@ -75,8 +147,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       message,
       mediaUrl: rawMediaUrl,
       phones,
-      minDelay,
-      maxDelay
+      spreadHours
     } = req.body;
 
     const text = message != null ? String(message).trim() : '';
@@ -130,12 +201,19 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       }
     }
 
-    const parsedMinDelay = minDelay != null ? parseInt(minDelay, 10) : 20000;
-    const parsedMaxDelay = maxDelay != null ? parseInt(maxDelay, 10) : 30000;
-    const safeMinDelay = Number.isFinite(parsedMinDelay) && parsedMinDelay >= 0 ? parsedMinDelay : 20000;
-    const safeMaxDelay = Number.isFinite(parsedMaxDelay) && parsedMaxDelay >= safeMinDelay
-      ? parsedMaxDelay
-      : Math.max(safeMinDelay, 30000);
+    const parsedSpread = spreadHours != null ? parseFloat(spreadHours) : DEFAULT_SPREAD_HOURS;
+    const safeSpreadHours = Number.isFinite(parsedSpread) && parsedSpread > 0
+      ? parsedSpread
+      : DEFAULT_SPREAD_HOURS;
+
+    const schedule = calculateBulkSchedule(phoneList.length, safeSpreadHours);
+    const startAt = new Date();
+    const estimatedCompletedAt = estimateCompletionAt(
+      phoneList.length,
+      schedule.delayBetweenMessagesMs,
+      startAt
+    );
+    const scheduledItems = buildItemSchedule(phoneList, schedule.delayBetweenMessagesMs, startAt);
 
     const job = await MessageJob.create({
       userId: req.user._id,
@@ -143,17 +221,20 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       message: text,
       mediaUrl,
       status: 'queued',
-      minDelay: safeMinDelay,
-      maxDelay: safeMaxDelay,
+      minDelay: schedule.minDelayMs,
+      maxDelay: schedule.maxDelayMs,
+      spreadHours: safeSpreadHours,
+      estimatedCompletedAt,
       totalCount: phoneList.length
     });
 
     await MessageJobItem.insertMany(
-      phoneList.map((phone) => ({
+      scheduledItems.map((row) => ({
         jobId: job._id,
         userId: req.user._id,
-        phone,
-        status: 'pending'
+        phone: row.phone,
+        status: 'pending',
+        scheduledAt: row.scheduledAt
       }))
     );
 
@@ -170,8 +251,26 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       jobId: job._id,
       total: phoneList.length,
       status: 'running',
-      note:
-        'First message sends immediately. Each following number waits minDelay–maxDelay ms. Poll GET /api/messages/jobs/:jobId for progress.'
+      spreadHours: safeSpreadHours,
+      schedule: {
+        delayBetweenMessagesMs: schedule.delayBetweenMessagesMs,
+        delayBetweenMessagesSeconds: schedule.delayBetweenMessagesSeconds,
+        minDelayMs: schedule.minDelayMs,
+        maxDelayMs: schedule.maxDelayMs,
+        estimatedTotalMs: schedule.estimatedTotalMs,
+        estimatedHours: schedule.estimatedHours,
+        estimatedDays: schedule.estimatedDays,
+        estimatedDuration: schedule.estimatedDuration,
+        maxPhones: schedule.maxPhones,
+        maxSpreadHours: schedule.maxSpreadHours,
+        maxTotalDurationAtMaxPhones: schedule.maxTotalDurationAtMaxPhones,
+        messagesPerHour: schedule.messagesPerHour,
+        spreadTargetMet: schedule.spreadTargetMet,
+        note: schedule.note,
+        ...(schedule.warning ? { warning: schedule.warning } : {})
+      },
+      estimatedCompletedAt,
+      note: 'Delays are fixed (minDelay = maxDelay). Messages send one by one on each scheduledAt time.'
     });
   } catch (err) {
     if (err.message === 'This WhatsApp client is already sending messages') {
@@ -197,6 +296,12 @@ router.get('/jobs/:jobId', authMiddleware, async (req, res) => {
 
     res.json({
       ...formatJobResponse(job),
+      schedule: {
+        spreadHours: job.spreadHours,
+        delayBetweenMessagesMs: job.minDelay,
+        delayBetweenMessagesSeconds: job.minDelay ? Math.round(job.minDelay / 1000) : 0,
+        estimatedCompletedAt: job.estimatedCompletedAt
+      },
       recentErrors: failedSamples.map((item) => ({
         phone: item.phone,
         error: item.error || 'Unknown error'

@@ -11,6 +11,7 @@ const mapRow = (row) => {
     status: row.status,
     whatsappMessageId: row.whatsapp_message_id,
     error: row.error,
+    scheduledAt: row.scheduled_at,
     sentAt: row.sent_at,
     createdAt: row.created_at
   };
@@ -39,14 +40,33 @@ const buildFilter = (filter = {}) => {
 };
 
 class MessageJobItemModel {
+  static async ensureColumns() {
+    try {
+      await query(`ALTER TABLE message_job_items ADD COLUMN scheduled_at DATETIME NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(
+        `CREATE INDEX idx_message_job_items_scheduled ON message_job_items (job_id, status, scheduled_at)`
+      );
+    } catch (err) {
+      if (!(String(err.message || '').includes('Duplicate key') || err.code === 'ER_DUP_KEYNAME')) {
+        throw err;
+      }
+    }
+  }
+
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, sent_at, created_at
+      SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
       FROM message_job_items
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
-    sql += ' ORDER BY created_at ASC';
+    sql += ' ORDER BY scheduled_at ASC, created_at ASC';
 
     if (options.limit !== undefined && options.limit !== null) {
       const limit = Number(options.limit);
@@ -76,6 +96,31 @@ class MessageJobItemModel {
     return rows[0]?.total || 0;
   }
 
+  static async findNextDue(jobId) {
+    const rows = await query(
+      `SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
+       FROM message_job_items
+       WHERE job_id = ? AND status = 'pending'
+         AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+       ORDER BY scheduled_at ASC, created_at ASC
+       LIMIT 1`,
+      [String(jobId)]
+    );
+    return mapRow(rows[0]);
+  }
+
+  static async findNextScheduledAt(jobId) {
+    const rows = await query(
+      `SELECT scheduled_at
+       FROM message_job_items
+       WHERE job_id = ? AND status = 'pending' AND scheduled_at > NOW()
+       ORDER BY scheduled_at ASC
+       LIMIT 1`,
+      [String(jobId)]
+    );
+    return rows[0]?.scheduled_at || null;
+  }
+
   static async insertMany(items = []) {
     if (items.length === 0) return [];
 
@@ -86,7 +131,7 @@ class MessageJobItemModel {
     items.forEach((item) => {
       const id = generateObjectId();
       ids.push(id);
-      placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+      placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
       values.push(
         id,
         item.jobId,
@@ -95,13 +140,14 @@ class MessageJobItemModel {
         item.status || 'pending',
         item.whatsappMessageId || null,
         item.error || null,
+        item.scheduledAt || null,
         item.sentAt || null
       );
     });
 
     await query(
       `INSERT INTO message_job_items (
-        id, job_id, user_id, phone, status, whatsapp_message_id, error, sent_at, created_at
+        id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
       ) VALUES ${placeholders.join(', ')}`,
       values
     );
@@ -116,6 +162,7 @@ class MessageJobItemModel {
       status: 'status',
       whatsappMessageId: 'whatsapp_message_id',
       error: 'error',
+      scheduledAt: 'scheduled_at',
       sentAt: 'sent_at'
     };
     const set = [];

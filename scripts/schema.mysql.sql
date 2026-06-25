@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS message_jobs (
     NOT NULL DEFAULT 'queued',
   min_delay INT NOT NULL DEFAULT 20000,
   max_delay INT NOT NULL DEFAULT 30000,
+  spread_hours DECIMAL(8,2) NOT NULL DEFAULT 16,
+  estimated_completed_at DATETIME NULL,
   total_count INT NOT NULL DEFAULT 0,
   sent_count INT NOT NULL DEFAULT 0,
   failed_count INT NOT NULL DEFAULT 0,
@@ -166,11 +168,13 @@ CREATE TABLE IF NOT EXISTS message_job_items (
   status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
   whatsapp_message_id VARCHAR(255) NULL,
   error TEXT NULL,
+  scheduled_at DATETIME NULL,
   sent_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_message_job_items_job_status (job_id, status),
   KEY idx_message_job_items_user_id (user_id),
+  KEY idx_message_job_items_scheduled (job_id, status, scheduled_at),
   CONSTRAINT fk_message_job_items_job
     FOREIGN KEY (job_id) REFERENCES message_jobs (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
