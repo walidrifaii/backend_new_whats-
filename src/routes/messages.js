@@ -67,10 +67,6 @@ const formatJobResponse = (job) => ({
   message: job.message,
   mediaUrl: job.mediaUrl,
   spreadHours: job.spreadHours,
-  delayBetweenMessagesMs: job.minDelay,
-  delayBetweenMessagesSeconds: job.minDelay ? Math.round(job.minDelay / 1000) : 0,
-  minDelay: job.minDelay,
-  maxDelay: job.maxDelay,
   estimatedCompletedAt: job.estimatedCompletedAt,
   startedAt: job.startedAt,
   completedAt: job.completedAt,
@@ -81,26 +77,8 @@ const buildSchedulePayload = (phoneCount, spreadHours) => {
   const schedule = calculateBulkSchedule(phoneCount, spreadHours);
   const startAt = new Date();
   return {
-    schedule: {
-      phoneCount: schedule.phoneCount,
-      maxPhones: schedule.maxPhones,
-      spreadHours: schedule.spreadHours,
-      maxSpreadHours: schedule.maxSpreadHours,
-      delayBetweenMessagesMs: schedule.delayBetweenMessagesMs,
-      delayBetweenMessagesSeconds: schedule.delayBetweenMessagesSeconds,
-      minDelayMs: schedule.minDelayMs,
-      maxDelayMs: schedule.maxDelayMs,
-      estimatedTotalMs: schedule.estimatedTotalMs,
-      estimatedHours: schedule.estimatedHours,
-      estimatedDays: schedule.estimatedDays,
-      estimatedDuration: schedule.estimatedDuration,
-      maxTotalDurationAtMaxPhones: schedule.maxTotalDurationAtMaxPhones,
-      messagesPerHour: schedule.messagesPerHour,
-      spreadTargetMet: schedule.spreadTargetMet,
-      note: schedule.note,
-      ...(schedule.warning ? { warning: schedule.warning } : {})
-    },
-    estimatedCompletedAt: estimateCompletionAt(phoneCount, schedule.delayBetweenMessagesMs, startAt)
+    estimatedCompletedAt: estimateCompletionAt(phoneCount, schedule.delayBetweenMessagesMs, startAt),
+    ...(schedule.warning ? { warning: schedule.warning } : {})
   };
 };
 
@@ -121,8 +99,9 @@ router.post('/send-bulk/preview', authMiddleware, async (req, res) => {
       ? parsedSpread
       : DEFAULT_SPREAD_HOURS;
 
+    const schedule = calculateBulkSchedule(phoneList.length, safeSpreadHours);
     const preview = buildSchedulePayload(phoneList.length, safeSpreadHours);
-    const itemSchedule = buildItemSchedule(phoneList, preview.schedule.delayBetweenMessagesMs);
+    const itemSchedule = buildItemSchedule(phoneList, schedule.delayBetweenMessagesMs);
 
     res.json({
       total: phoneList.length,
@@ -252,25 +231,8 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       total: phoneList.length,
       status: 'running',
       spreadHours: safeSpreadHours,
-      schedule: {
-        delayBetweenMessagesMs: schedule.delayBetweenMessagesMs,
-        delayBetweenMessagesSeconds: schedule.delayBetweenMessagesSeconds,
-        minDelayMs: schedule.minDelayMs,
-        maxDelayMs: schedule.maxDelayMs,
-        estimatedTotalMs: schedule.estimatedTotalMs,
-        estimatedHours: schedule.estimatedHours,
-        estimatedDays: schedule.estimatedDays,
-        estimatedDuration: schedule.estimatedDuration,
-        maxPhones: schedule.maxPhones,
-        maxSpreadHours: schedule.maxSpreadHours,
-        maxTotalDurationAtMaxPhones: schedule.maxTotalDurationAtMaxPhones,
-        messagesPerHour: schedule.messagesPerHour,
-        spreadTargetMet: schedule.spreadTargetMet,
-        note: schedule.note,
-        ...(schedule.warning ? { warning: schedule.warning } : {})
-      },
       estimatedCompletedAt,
-      note: 'Delays are fixed (minDelay = maxDelay). Messages send one by one on each scheduledAt time.'
+      ...(schedule.warning ? { warning: schedule.warning } : {})
     });
   } catch (err) {
     if (err.message === 'This WhatsApp client is already sending messages') {
@@ -296,12 +258,6 @@ router.get('/jobs/:jobId', authMiddleware, async (req, res) => {
 
     res.json({
       ...formatJobResponse(job),
-      schedule: {
-        spreadHours: job.spreadHours,
-        delayBetweenMessagesMs: job.minDelay,
-        delayBetweenMessagesSeconds: job.minDelay ? Math.round(job.minDelay / 1000) : 0,
-        estimatedCompletedAt: job.estimatedCompletedAt
-      },
       recentErrors: failedSamples.map((item) => ({
         phone: item.phone,
         error: item.error || 'Unknown error'
