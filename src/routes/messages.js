@@ -5,13 +5,32 @@ const MessageJob = require('../models/MessageJob');
 const MessageJobItem = require('../models/MessageJobItem');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
-const { sendMessage } = require('../services/whatsappManager');
+const { sendMessage, isClientConnected } = require('../services/whatsappManager');
 const { startMessageJob, isClientSending } = require('../services/messageJobQueue');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
-const { sanitizeMediaUrl } = require('../utils/campaignMedia');
+const { sanitizeMediaUrl, validateMediaUrlReachable } = require('../utils/campaignMedia');
 const authMiddleware = require('../middleware/auth');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
+
+const CLIENT_NOT_FOUND_HELP =
+  'Client not found for this account. Call GET /api/clients with the same Bearer token and use the `_id` field (or session `clientId` like client_xxx).';
+
+/**
+ * Resolve a WhatsApp client by database id (_id) or session clientId (client_xxx).
+ */
+const resolveWhatsAppClient = async (clientIdParam, userId) => {
+  const id = String(clientIdParam || '').trim();
+  if (!id) return null;
+
+  const base = { userId, isActive: true };
+
+  const byDbId = await WhatsAppClientModel.findOne({ ...base, _id: id });
+  if (byDbId) return byDbId;
+
+  const bySessionId = await WhatsAppClientModel.findOne({ ...base, clientId: id });
+  return bySessionId || null;
+};
 
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
@@ -87,17 +106,28 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       });
     }
 
-    const dbClient = await WhatsAppClientModel.findOne({
-      _id: clientId,
-      userId: req.user._id,
-      isActive: true
-    });
-    if (!dbClient) return res.status(404).json({ error: 'Client not found' });
+    const dbClient = await resolveWhatsAppClient(clientId, req.user._id);
+    if (!dbClient) {
+      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
+    }
     if (dbClient.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }
+    if (!isClientConnected(dbClient.clientId)) {
+      return res.status(400).json({
+        error:
+          'WhatsApp session is offline on the server. Open the dashboard and reconnect this client before sending.'
+      });
+    }
     if (isClientSending(dbClient.clientId)) {
       return res.status(409).json({ error: 'This WhatsApp client is already sending messages' });
+    }
+
+    if (mediaUrl) {
+      const mediaCheck = await validateMediaUrlReachable(mediaUrl);
+      if (!mediaCheck.ok) {
+        return res.status(400).json({ error: mediaCheck.reason });
+      }
     }
 
     const parsedMinDelay = minDelay != null ? parseInt(minDelay, 10) : 20000;
@@ -127,13 +157,21 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       }))
     );
 
-    await startMessageJob(job._id);
+    try {
+      await startMessageJob(job._id);
+    } catch (startErr) {
+      await MessageJobItem.failPendingByJobId(job._id, startErr.message);
+      await MessageJob.findByIdAndUpdate(job._id, { status: 'failed', completedAt: new Date() });
+      throw startErr;
+    }
 
     res.status(202).json({
       message: 'Bulk job started',
       jobId: job._id,
       total: phoneList.length,
-      status: 'queued'
+      status: 'running',
+      note:
+        'First message sends immediately. Each following number waits minDelay–maxDelay ms. Poll GET /api/messages/jobs/:jobId for progress.'
     });
   } catch (err) {
     if (err.message === 'This WhatsApp client is already sending messages') {
@@ -151,7 +189,19 @@ router.get('/jobs/:jobId', authMiddleware, async (req, res) => {
       userId: req.user._id
     });
     if (!job) return res.status(404).json({ error: 'Bulk job not found' });
-    res.json(formatJobResponse(job));
+
+    const failedSamples = await MessageJobItem.find(
+      { jobId: job._id, status: 'failed' },
+      { limit: 5 }
+    );
+
+    res.json({
+      ...formatJobResponse(job),
+      recentErrors: failedSamples.map((item) => ({
+        phone: item.phone,
+        error: item.error || 'Unknown error'
+      }))
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -216,12 +266,10 @@ router.post('/send', authMiddleware, async (req, res) => {
       });
     }
 
-    const dbClient = await WhatsAppClientModel.findOne({
-      _id: clientId,
-      userId: req.user._id,
-      isActive: true
-    });
-    if (!dbClient) return res.status(404).json({ error: 'Client not found' });
+    const dbClient = await resolveWhatsAppClient(clientId, req.user._id);
+    if (!dbClient) {
+      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
+    }
     if (dbClient.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }

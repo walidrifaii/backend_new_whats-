@@ -3,7 +3,7 @@ const MessageJobItem = require('../models/MessageJobItem');
 const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
-const { sendMessage } = require('./whatsappManager');
+const { sendMessage, isClientConnected } = require('./whatsappManager');
 const { normalizePhone, sleep, randomDelay } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
@@ -51,6 +51,16 @@ const processMessageJob = async (jobId) => {
 
   const sessionClientId = dbClient.clientId;
   const jobOwner = await User.findById(job.userId);
+
+  if (!isClientConnected(sessionClientId)) {
+    const reason =
+      'WhatsApp session is not active on the server. Reconnect the client from the dashboard (status may show connected in DB but session is offline).';
+    console.error(`⛔ Bulk job ${jobId}: ${reason}`);
+    await failPendingItems(jobId, reason);
+    activeJobsByClient.delete(sessionClientId);
+    runningJobPromises.delete(jobId);
+    return;
+  }
 
   await MessageJob.findByIdAndUpdate(jobId, {
     status: 'running',
@@ -185,13 +195,20 @@ const processMessageJob = async (jobId) => {
   const finalJob = await MessageJob.findById(jobId);
   if (finalJob && finalJob.status === 'running') {
     const pending = await MessageJobItem.countDocuments({ jobId, status: 'pending' });
-    const finalStatus = pending > 0 ? 'failed' : 'completed';
+    let finalStatus = 'completed';
+    if (pending > 0) finalStatus = 'failed';
+    else if (finalJob.sentCount === 0 && finalJob.failedCount > 0) finalStatus = 'failed';
     await MessageJob.findByIdAndUpdate(jobId, {
       status: finalStatus,
       completedAt: new Date()
     });
-    emitToClient(sessionClientId, 'bulk-job-completed', { jobId, status: finalStatus });
-    console.log(`🎉 Bulk job ${jobId} ${finalStatus}`);
+    emitToClient(sessionClientId, 'bulk-job-completed', {
+      jobId,
+      status: finalStatus,
+      sentCount: finalJob.sentCount,
+      failedCount: finalJob.failedCount
+    });
+    console.log(`🎉 Bulk job ${jobId} ${finalStatus} (sent=${finalJob.sentCount}, failed=${finalJob.failedCount})`);
   }
 
   activeJobsByClient.delete(sessionClientId);

@@ -59,11 +59,54 @@ function resolveMediaTypeForDb(body) {
   return { set: true, value: s.trim() };
 }
 
+/** Detect example/placeholder URLs that will always fail at send time. */
+function isPlaceholderMediaUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return /(?:^|\/\/)(?:[^/]*\.)?(?:example\.com|yoursite\.com)(?:\/|$)/i.test(url.trim());
+}
+
+/**
+ * Verify the server can download the media URL (same requirement as WhatsApp send).
+ */
+async function validateMediaUrlReachable(url, { timeoutMs = 12000 } = {}) {
+  if (!url) return { ok: true };
+  if (isPlaceholderMediaUrl(url)) {
+    return {
+      ok: false,
+      reason: 'mediaUrl looks like a placeholder (example.com / yoursite.com). Use a real public image URL or remove mediaUrl.'
+    };
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    return { ok: false, reason: 'mediaUrl must start with http:// or https://' };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: { Range: 'bytes=0-1023' }
+    });
+    if (!res.ok && res.status !== 206) {
+      return { ok: false, reason: `Media URL returned HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? 'timed out' : err.message;
+    return { ok: false, reason: `Media URL not reachable: ${msg}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 module.exports = {
   sanitizeMediaUrl,
   pickRawMediaUrl,
   pickRawMediaType,
   bodyHasMediaUrlKey,
   resolveMediaUrlForDb,
-  resolveMediaTypeForDb
+  resolveMediaTypeForDb,
+  isPlaceholderMediaUrl,
+  validateMediaUrlReachable
 };
