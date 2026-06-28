@@ -415,7 +415,7 @@ const sendMessage = async (clientId, phone, message, options = null) => {
   if (!dbClient || dbClient.status !== 'connected') {
     throw new Error(`Client ${clientId} is not connected`);
   }
-  // test
+  // test walid
 
   const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const text = message != null ? String(message) : '';
