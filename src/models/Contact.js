@@ -9,7 +9,9 @@ const mapRow = (row) => {
     campaignId: row.campaign_id,
     name: row.name,
     phone: row.phone,
-    variables: row.variables ? JSON.parse(row.variables) : {},
+    variables: row.variables
+      ? (typeof row.variables === 'string' ? JSON.parse(row.variables) : row.variables)
+      : {},
     status: row.status,
     sentAt: row.sent_at,
     error: row.error,
