@@ -7,12 +7,6 @@ const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
 
-const getTokenExpiryDate = (token) => {
-  const decoded = jwt.decode(token);
-  if (!decoded?.exp) return null;
-  return new Date(decoded.exp * 1000);
-};
-
 // POST /api/auth/register
 router.post('/register', [
   body('name').trim().notEmpty().withMessage('Name is required'),
@@ -28,13 +22,13 @@ router.post('/register', [
     if (existing) return res.status(400).json({ error: 'Email already registered' });
 
     const user = await User.create({ name, email, password });
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET);
     await User.saveToken(user._id, token);
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'user',
       ownerId: user._id,
-      expiresAt: getTokenExpiryDate(token)
+      expiresAt: null
     });
     res.status(201).json({ token, user });
   } catch (err) {
@@ -59,13 +53,13 @@ router.post('/login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET);
     await User.saveToken(user._id, token);
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'user',
       ownerId: user._id,
-      expiresAt: getTokenExpiryDate(token)
+      expiresAt: null
     });
     return res.json({ token, user });
   } catch (err) {
@@ -95,12 +89,12 @@ router.post('/admin-login', [
       await Admin.updatePasswordHash(admin._id, password);
     }
 
-    const token = jwt.sign({ adminId: admin._id, type: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ adminId: admin._id, type: 'admin' }, process.env.JWT_SECRET);
     await TokenSession.createOrUpdate({
       token,
       ownerType: 'admin',
       ownerId: admin._id,
-      expiresAt: getTokenExpiryDate(token)
+      expiresAt: null
     });
     const safeAdmin = { ...admin };
     delete safeAdmin.password;
