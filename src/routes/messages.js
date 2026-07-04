@@ -5,7 +5,7 @@ const MessageJob = require('../models/MessageJob');
 const MessageJobItem = require('../models/MessageJobItem');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
-const { sendMessage, isClientConnected } = require('../services/whatsappManager');
+const { sendMessage, isClientConnected, waitForClientReady } = require('../services/whatsappManager');
 const { startMessageJob, isClientSending } = require('../services/messageJobQueue');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const { sanitizeMediaUrl, validateMediaUrlReachable } = require('../utils/campaignMedia');
@@ -334,11 +334,18 @@ router.post('/send', authMiddleware, async (req, res) => {
     if (dbClient.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
     }
+    if (!isClientConnected(dbClient.clientId)) {
+      return res.status(503).json({
+        error:
+          'WhatsApp session is starting on the server. Wait until the client shows Ready, then try again.'
+      });
+    }
     if (isClientSending(dbClient.clientId)) {
       return res.status(409).json({ error: 'This WhatsApp client is already sending messages' });
     }
 
     const sendOpts = mediaUrl && String(mediaUrl).trim() ? { mediaUrl: String(mediaUrl).trim() } : null;
+    await waitForClientReady(dbClient.clientId);
     const result = await sendMessage(
       dbClient.clientId,
       phone,

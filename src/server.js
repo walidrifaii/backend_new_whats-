@@ -11,6 +11,7 @@ const clientRoutes   = require('./routes/clients');
 const campaignRoutes = require('./routes/campaigns');
 const contactRoutes  = require('./routes/contacts');
 const messageRoutes  = require('./routes/messages');
+const otpRoutes      = require('./routes/otp');
 const logRoutes      = require('./routes/logs');
 const adminRoutes    = require('./routes/admin');
 
@@ -69,6 +70,7 @@ app.use('/api/clients',   clientRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/contacts',  contactRoutes);
 app.use('/api/messages',  messageRoutes);
+app.use('/api/otp',       otpRoutes);
 app.use('/api/logs',      logRoutes);
 app.use('/api/admin',     adminRoutes);
 

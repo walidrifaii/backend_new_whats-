@@ -598,6 +598,7 @@ const isRetryableSendError = (err) => {
   return (
     msg.includes('getchat') ||
     msg.includes('not ready') ||
+    msg.includes('no active client') ||
     msg.includes('evaluation failed') ||
     msg.includes('protocol error') ||
     msg.includes('target closed') ||
@@ -610,12 +611,16 @@ const isRetryableSendError = (err) => {
 const waitForClientReady = async (clientId, maxWaitMs = null) => {
   const deadline = Date.now() + (maxWaitMs ?? getSendReadyWaitMs());
   let lastState = 'unknown';
+  let sawClient = false;
 
   while (Date.now() < deadline) {
     const wClient = activeClients.get(clientId);
     if (!wClient) {
-      throw new Error(`No active client for ${clientId}`);
+      await sleep(1500);
+      continue;
     }
+
+    sawClient = true;
 
     if (wClient.info?.wid?.user) {
       try {
@@ -630,6 +635,10 @@ const waitForClientReady = async (clientId, maxWaitMs = null) => {
     }
 
     await sleep(1500);
+  }
+
+  if (!sawClient) {
+    throw new Error(`No active client for ${clientId}`);
   }
 
   throw new Error(
@@ -653,10 +662,7 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const wClient = await waitForClientReady(
-        clientId,
-        attempt === 1 ? Math.min(15000, getSendReadyWaitMs()) : getSendReadyWaitMs()
-      );
+      const wClient = await waitForClientReady(clientId, getSendReadyWaitMs());
 
       let result;
       if (mediaUrl) {

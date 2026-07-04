@@ -7,7 +7,7 @@ const MessageLog = require('../models/MessageLog');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { query } = require('../db/mysql');
-const { sendMessage } = require('./whatsappManager');
+const { sendMessage, isClientConnected, waitForClientReady } = require('./whatsappManager');
 const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
@@ -113,6 +113,23 @@ const processCampaign = async (campaignId) => {
   const campaignOwner = await User.findById(dbClient.userId);
 
   console.log(`🚀 Starting campaign ${campaignId} via client ${clientId}`);
+
+  try {
+    if (!isClientConnected(clientId)) {
+      console.log(`⏳ Campaign ${campaignId}: waiting for WhatsApp client ${clientId}...`);
+    }
+    await waitForClientReady(clientId);
+    console.log(`✅ Campaign ${campaignId}: WhatsApp client ready`);
+  } catch (err) {
+    console.error(`⛔ Campaign ${campaignId}: client not ready — ${err.message}`);
+    await Campaign.findByIdAndUpdate(campaignId, { status: 'paused' });
+    emitToClient(clientId, 'campaign-paused', {
+      campaignId,
+      reason: err.message
+    });
+    campaignQueues.delete(campaignId.toString());
+    return;
+  }
 
   // Get all pending contacts in batches
   let hasMore = true;
