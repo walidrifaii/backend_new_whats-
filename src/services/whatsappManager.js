@@ -775,23 +775,78 @@ const isRetryableSendError = (err) => {
   );
 };
 
-/** Resolve phone → WhatsApp chat id (@c.us or @lid) via getNumberId when available. */
-const resolveChatId = async (wClient, phone) => {
-  const raw = String(phone || '').replace('@c.us', '').replace('@lid', '').trim();
-  const digits = normalizePhone(raw).replace('@c.us', '');
+/** ACK levels from whatsapp-web.js Message.ack */
+const ACK_ERROR = -1;
+const ACK_PENDING = 0;
+const ACK_SERVER = 1;
+const ACK_DEVICE = 2;
 
-  if (typeof wClient.getNumberId === 'function') {
+const phoneDigitsOnly = (phone) =>
+  normalizePhone(String(phone || '').replace('@c.us', '').replace('@lid', ''));
+
+/** Resolve phone → WhatsApp chat id (@c.us or @lid) via getNumberId. */
+const tryGetNumberId = async (wClient, digits) => {
+  if (typeof wClient.getNumberId !== 'function') return null;
+
+  const candidates = [digits, `${digits}@c.us`];
+  for (const candidate of candidates) {
     try {
-      const numberId = await wClient.getNumberId(digits);
-      if (numberId?._serialized) {
-        return numberId._serialized;
-      }
+      const numberId = await wClient.getNumberId(candidate);
+      if (numberId?._serialized) return numberId._serialized;
     } catch (e) {
-      console.warn(`getNumberId failed for ${digits}:`, e.message);
+      console.warn(`getNumberId(${candidate}) failed:`, e.message);
     }
   }
+  return null;
+};
 
-  return digits.includes('@') ? digits : `${digits}@c.us`;
+const resolveChatId = async (wClient, phone, { requireRegistered = false } = {}) => {
+  const digits = phoneDigitsOnly(phone);
+  if (!digits) {
+    throw new Error('Invalid phone number');
+  }
+
+  const resolved = await tryGetNumberId(wClient, digits);
+  if (resolved) return resolved;
+
+  if (requireRegistered) {
+    throw new Error(
+      `Phone ${digits} is not registered on WhatsApp or could not be resolved. Check the number and country code (e.g. 96170657961).`
+    );
+  }
+
+  console.warn(`getNumberId returned nothing for ${digits} — falling back to ${digits}@c.us`);
+  return `${digits}@c.us`;
+};
+
+/** Wait until WhatsApp reports at least minAck (1=server, 2=delivered to device). */
+const waitForMessageAck = async (message, minAck = ACK_SERVER, timeoutMs = 12000) => {
+  if (!message) {
+    throw new Error('No message object returned from WhatsApp');
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ack = typeof message.ack === 'number' ? message.ack : ACK_PENDING;
+    if (ack === ACK_ERROR) {
+      throw new Error('WhatsApp rejected the message (delivery error)');
+    }
+    if (ack >= minAck) {
+      return ack;
+    }
+    await sleep(400);
+  }
+
+  const finalAck = typeof message.ack === 'number' ? message.ack : ACK_PENDING;
+  if (finalAck === ACK_ERROR) {
+    throw new Error('WhatsApp rejected the message (delivery error)');
+  }
+  if (finalAck < minAck) {
+    throw new Error(
+      `Message not confirmed by WhatsApp (ack=${finalAck}, need >=${minAck}). The number may be wrong or unreachable.`
+    );
+  }
+  return finalAck;
 };
 
 /** Wait until whatsapp-web.js reports CONNECTED and wid is available (avoids getChat races). */
@@ -846,14 +901,29 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
     ? String(opts.mediaUrl).trim()
     : null;
 
+  const requireRegistered = Boolean(opts?.requireRegistered);
+  const waitForAck =
+    opts?.waitForAck !== undefined && opts?.waitForAck !== null
+      ? Number(opts.waitForAck)
+      : 0;
+  const waitForAckMs = parseEnvInt('OTP_ACK_WAIT_MS', Number(opts?.waitForAckMs) || 12000);
+
   const maxAttempts = getSendMaxRetries();
   let lastError;
-  let chatId = phone.includes('@') ? phone : `${normalizePhone(phone).replace('@c.us', '')}@c.us`;
+  let chatId = phone.includes('@') ? phone : `${phoneDigitsOnly(phone)}@c.us`;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const wClient = await waitForClientReady(clientId, getSendReadyWaitMs());
-      chatId = await resolveChatId(wClient, phone);
+      chatId = await resolveChatId(wClient, phone, { requireRegistered });
+
+      if (typeof wClient.sendPresenceAvailable === 'function') {
+        try {
+          await wClient.sendPresenceAvailable();
+        } catch (_) {
+          /* non-fatal */
+        }
+      }
 
       let result;
       if (mediaUrl) {
@@ -872,7 +942,17 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
         result = await wClient.sendMessage(chatId, message);
       }
 
+      let deliveryAck = typeof result?.ack === 'number' ? result.ack : ACK_PENDING;
+      if (waitForAck > 0) {
+        deliveryAck = await waitForMessageAck(result, waitForAck, waitForAckMs);
+      }
+
+      console.log(
+        `📤 Sent ${clientId} → ${chatId} (ack=${deliveryAck}, msg=${result?.id?._serialized || 'n/a'})`
+      );
+
       await WhatsAppClientModel.findOneAndUpdate({ clientId }, { $inc: { messagesSent: 1 } });
+      result._deliveryMeta = { chatId, ack: deliveryAck };
       return result;
     } catch (err) {
       lastError = err;

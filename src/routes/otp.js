@@ -147,8 +147,15 @@ router.post(
           ? String(req.body.message).trim()
           : buildOtpMessage(code);
 
-      const result = await sendMessage(sessionClientId, phone, text);
+      const minAck = parseInt(process.env.OTP_MIN_ACK || '1', 10);
+      const result = await sendMessage(sessionClientId, phone, text, {
+        requireRegistered: true,
+        waitForAck: Number.isFinite(minAck) ? minAck : 1,
+        waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '12000', 10)
+      });
       const messageId = result?.id?._serialized || null;
+      const chatId = result?._deliveryMeta?.chatId || null;
+      const deliveryAck = result?._deliveryMeta?.ack ?? null;
 
       await MessageLog.create({
         userId: dbClient.userId,
@@ -160,7 +167,9 @@ router.post(
         whatsappMessageId: messageId
       });
 
-      console.log(`✅ OTP sent to ${phone} via ${sessionClientId}`);
+      console.log(
+        `✅ OTP sent to ${phone} via ${sessionClientId} chatId=${chatId} ack=${deliveryAck} msgId=${messageId}`
+      );
 
       return res.json({
         ok: true,
@@ -168,6 +177,8 @@ router.post(
         channel: 'whatsapp_node',
         expires_in: getOtpExpiresMinutes() * 60,
         messageId,
+        chatId,
+        deliveryAck,
         clientId: sessionClientId
       });
     } catch (err) {
