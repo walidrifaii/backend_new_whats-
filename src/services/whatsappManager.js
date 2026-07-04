@@ -759,6 +759,15 @@ const destroyAllClients = async () => {
   }
 };
 
+const isLidRelatedError = (err) => {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return (
+    msg.includes('lid is missing') ||
+    msg.includes('no lid') ||
+    (msg.includes('lid') && msg.includes('chat table'))
+  );
+};
+
 const isRetryableSendError = (err) => {
   const msg = String(err?.message || err || '').toLowerCase();
   return (
@@ -770,8 +779,7 @@ const isRetryableSendError = (err) => {
     msg.includes('target closed') ||
     msg.includes('session closed') ||
     msg.includes('cannot read properties of undefined') ||
-    msg.includes('lid is missing') ||
-    msg.includes('chat table')
+    isLidRelatedError(err)
   );
 };
 
@@ -783,6 +791,8 @@ const ACK_DEVICE = 2;
 
 const phoneDigitsOnly = (phone) =>
   normalizePhone(String(phone || '').replace('@c.us', '').replace('@lid', ''));
+
+const toCUsJid = (digits) => `${phoneDigitsOnly(digits)}@c.us`;
 
 /** Resolve phone → WhatsApp chat id (@c.us or @lid) via getNumberId. */
 const tryGetNumberId = async (wClient, digits) => {
@@ -800,23 +810,82 @@ const tryGetNumberId = async (wClient, digits) => {
   return null;
 };
 
+const isWhatsAppRegistered = async (wClient, digits) => {
+  const resolved = await tryGetNumberId(wClient, digits);
+  return Boolean(resolved);
+};
+
+/**
+ * Always send using @c.us JID. getNumberId often returns @lid which fails for new contacts
+ * ("Lid is missing in chat table") — use getNumberId only to verify registration.
+ */
 const resolveChatId = async (wClient, phone, { requireRegistered = false } = {}) => {
   const digits = phoneDigitsOnly(phone);
   if (!digits) {
     throw new Error('Invalid phone number');
   }
 
-  const resolved = await tryGetNumberId(wClient, digits);
-  if (resolved) return resolved;
-
   if (requireRegistered) {
-    throw new Error(
-      `Phone ${digits} is not registered on WhatsApp or could not be resolved. Check the number and country code (e.g. 96170657961).`
-    );
+    const registered = await isWhatsAppRegistered(wClient, digits);
+    if (!registered) {
+      throw new Error(
+        `Phone ${digits} is not registered on WhatsApp or could not be resolved. Check the number and country code (e.g. 96170657961).`
+      );
+    }
   }
 
-  console.warn(`getNumberId returned nothing for ${digits} — falling back to ${digits}@c.us`);
-  return `${digits}@c.us`;
+  const cus = toCUsJid(digits);
+  const resolved = await tryGetNumberId(wClient, digits);
+  if (resolved?.includes('@lid')) {
+    console.log(`📱 ${digits} maps to ${resolved} — sending via ${cus} (avoids LID chat-table errors)`);
+  }
+  return cus;
+};
+
+/** Send text; prefer @c.us, fall back through getContactLidAndPhone only on LID errors. */
+const sendTextMessage = async (wClient, phone, message) => {
+  const digits = phoneDigitsOnly(phone);
+  const cus = toCUsJid(digits);
+
+  try {
+    const result = await wClient.sendMessage(cus, message);
+    return { result, chatId: cus };
+  } catch (err) {
+    if (!isLidRelatedError(err)) throw err;
+    console.warn(`sendMessage(${cus}) LID error: ${err.message}`);
+  }
+
+  if (typeof wClient.getContactLidAndPhone === 'function') {
+    try {
+      const mapping = await wClient.getContactLidAndPhone([cus]);
+      const row = mapping?.[0];
+      const pn =
+        row?.pn?._serialized ||
+        (typeof row?.pn === 'string' ? row.pn : null);
+      const lid =
+        row?.lid?._serialized ||
+        (typeof row?.lid === 'string' ? row.lid : null);
+
+      const targets = [pn, cus, lid].filter((t) => t && typeof t === 'string');
+      const unique = [...new Set(targets)];
+
+      for (const target of unique) {
+        if (target.includes('@lid')) continue;
+        try {
+          console.log(`📱 LID fallback: retry send via ${target}`);
+          const result = await wClient.sendMessage(target, message);
+          return { result, chatId: target };
+        } catch (e) {
+          console.warn(`sendMessage(${target}) failed:`, e.message);
+        }
+      }
+    } catch (e) {
+      console.warn('getContactLidAndPhone failed:', e.message);
+    }
+  }
+
+  const result = await wClient.sendMessage(cus, message);
+  return { result, chatId: cus };
 };
 
 /** Wait for message_ack event; fall back to checking outgoing messages in the chat. */
@@ -994,13 +1063,9 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
           throw new Error(`Media send failed: ${err.message}`);
         }
       } else {
-        try {
-          const chat = await wClient.getChatById(chatId);
-          result = await chat.sendMessage(message);
-        } catch (chatErr) {
-          console.warn(`getChatById/send failed for ${chatId}, using client.sendMessage:`, chatErr.message);
-          result = await wClient.sendMessage(chatId, message);
-        }
+        const sent = await sendTextMessage(wClient, phone, message);
+        result = sent.result;
+        chatId = sent.chatId;
       }
 
       let deliveryAck = typeof result?.ack === 'number' ? result.ack : ACK_PENDING;
@@ -1017,6 +1082,9 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
       return result;
     } catch (err) {
       lastError = err;
+      if (isLidRelatedError(err)) {
+        chatId = toCUsJid(phoneDigitsOnly(phone));
+      }
       const retryable = isRetryableSendError(err) && !String(err.message || '').startsWith('Media send failed');
       if (!retryable || attempt >= maxAttempts) {
         throw err;
