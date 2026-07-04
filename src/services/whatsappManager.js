@@ -5,11 +5,14 @@ const fs = require('fs');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
 const { emitToClient } = require('../utils/socket');
+const { notifyWhatsAppDisconnected } = require('./disconnectNotifier');
 
 // ─── Active clients map ───────────────────────────────────────────────────────
 const activeClients = new Map();
 /** Clients being stopped for deploy/restart — keep DB `connected` + session on disk */
 const clientsPreservingSession = new Set();
+/** Manual dashboard disconnect — do not email the user */
+const clientsSkippingDisconnectEmail = new Set();
 
 // Per-client QR state — stuck unauthenticated clients keep Chromium alive and can OOM the server.
 const qrMeta = new Map();
@@ -449,6 +452,11 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     try { await wClient.destroy(); } catch (_) {}
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'auth_failure', qrCode: null });
     emitToClient(clientId, 'auth_failure', { clientId, message: msg });
+    notifyWhatsAppDisconnected({
+      clientId,
+      reason: String(msg || 'auth_failure'),
+      eventType: 'auth_failure'
+    });
   });
 
   wClient.on('disconnected', async (reason) => {
@@ -459,11 +467,23 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 
     if (shouldKeepConnectedOnDisconnect(clientId)) {
       console.log(`💾 ${clientId}: deploy shutdown — keeping connected status for auto-restore`);
+      clientsSkippingDisconnectEmail.delete(clientId);
       return;
     }
 
+    const skipEmail = clientsSkippingDisconnectEmail.has(clientId);
+    clientsSkippingDisconnectEmail.delete(clientId);
+
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
     emitToClient(clientId, 'disconnected', { clientId, reason });
+
+    if (!skipEmail) {
+      notifyWhatsAppDisconnected({
+        clientId,
+        reason: String(reason || 'disconnected'),
+        eventType: 'disconnected'
+      });
+    }
   });
 
   wClient.on('message', async (msg) => {
@@ -512,6 +532,9 @@ const destroyClient = async (clientId, options = {}) => {
   const preserveSession = options.preserveSession === true;
   if (preserveSession) {
     clientsPreservingSession.add(clientId);
+  }
+  if (options.skipDisconnectEmail === true) {
+    clientsSkippingDisconnectEmail.add(clientId);
   }
 
   clearQrMeta(clientId);

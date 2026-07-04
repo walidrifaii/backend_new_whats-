@@ -177,7 +177,7 @@ router.post('/:id/disconnect', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    await destroyClient(client.clientId);
+    await destroyClient(client.clientId, { skipDisconnectEmail: true });
     res.json({ message: 'Client disconnected', client });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -230,7 +230,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    await destroyClient(client.clientId);
+    await destroyClient(client.clientId, { skipDisconnectEmail: true });
     await WhatsAppClientModel.findByIdAndUpdate(client._id, { isActive: false });
     res.json({ message: 'Client deleted' });
   } catch (err) {

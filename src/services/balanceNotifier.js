@@ -1,32 +1,9 @@
-const nodemailer = require('nodemailer');
+const { getTransporter } = require('../utils/smtp');
 
 const notifyCooldown = new Map();
 const COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
-const getTransporter = () => {
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT || '587', 10);
-  const user = process.env.SMTP_USER;
-  const rawPass = process.env.SMTP_PASS;
-  const pass = String(rawPass || '').replace(/[\s_]/g, '');
-  const secure = String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true';
-
-  if (!host || !user || !pass) {
-    return { transporter: null, reason: 'smtp_not_configured' };
-  }
-
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass }
-  });
-
-  return { transporter, reason: 'ok' };
-};
-
-const shouldNotify = (userId) => {
-  const now = Date.now();
+const shouldNotify = (userId) => {  const now = Date.now();
   const last = notifyCooldown.get(String(userId)) || 0;
   if (now - last < COOLDOWN_MS) {
     return { ok: false, reason: 'cooldown_active' };

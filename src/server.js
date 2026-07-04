@@ -77,6 +77,7 @@ app.use('/api/admin',     adminRoutes);
 app.get('/api/health', (_req, res) => {
   const serviceKey = Boolean(String(process.env.OTP_SERVICE_SECRET || '').trim());
   const jwtAuth = Boolean(String(process.env.JWT_SECRET || '').trim());
+  const { isSmtpConfigured } = require('./utils/smtp');
   return res.json({
     status: 'ok',
     timestamp: new Date(),
@@ -89,6 +90,10 @@ app.get('/api/health', (_req, res) => {
         ...(jwtAuth ? ['Authorization: Bearer <WHATSAPP_NODE_TOKEN>'] : []),
         ...(serviceKey ? ['X-Service-Key: <OTP_SERVICE_SECRET>'] : [])
       ]
+    },
+    disconnectEmail: {
+      enabled: String(process.env.WHATSAPP_DISCONNECT_EMAIL_ENABLED || 'true').toLowerCase() !== 'false',
+      smtpConfigured: isSmtpConfigured()
     }
   });
 });
