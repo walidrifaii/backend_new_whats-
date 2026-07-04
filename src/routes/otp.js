@@ -9,7 +9,7 @@ const {
   waitForClientReady
 } = require('../services/whatsappManager');
 const { normalizePhone } = require('../utils/helpers');
-const serviceAuthMiddleware = require('../middleware/serviceAuth');
+const otpAuthMiddleware = require('../middleware/otpAuth');
 
 const getOtpExpiresMinutes = () => {
   const n = parseInt(process.env.OTP_EXPIRES_MINUTES || '5', 10);
@@ -26,26 +26,39 @@ const buildOtpMessage = (code) => {
     .replace(/\{minutes\}/g, String(getOtpExpiresMinutes()));
 };
 
-const resolveOtpClient = async (clientIdParam) => {
-  const explicit = String(clientIdParam || process.env.OTP_DEFAULT_CLIENT_ID || '').trim();
+const resolveOtpClient = async (clientIdParam, userId = null) => {
+  const explicit = String(
+    clientIdParam ||
+      process.env.OTP_DEFAULT_CLIENT_ID ||
+      process.env.WHATSAPP_NODE_CLIENT_ID ||
+      ''
+  ).trim();
+
+  const belongsToUser = (client) => {
+    if (!userId) return true;
+    return String(client.userId) === String(userId);
+  };
+
   if (explicit) {
     const bySession = await WhatsAppClientModel.findOne({
       clientId: explicit,
       isActive: true,
       status: 'connected'
     });
-    if (bySession) return bySession;
+    if (bySession && belongsToUser(bySession)) return bySession;
 
     const byDbId = await WhatsAppClientModel.findOne({
       _id: explicit,
       isActive: true,
       status: 'connected'
     });
-    if (byDbId) return byDbId;
+    if (byDbId && belongsToUser(byDbId)) return byDbId;
     return null;
   }
 
-  const connected = await WhatsAppClientModel.find({ isActive: true, status: 'connected' });
+  const filter = { isActive: true, status: 'connected' };
+  if (userId) filter.userId = userId;
+  const connected = await WhatsAppClientModel.find(filter);
   return connected[0] || null;
 };
 
@@ -56,19 +69,31 @@ const ensureClientReadyForSend = async (sessionClientId) => {
   await waitForClientReady(sessionClientId);
 };
 
+const otpCodeValidator = body('code')
+  .optional()
+  .trim()
+  .notEmpty()
+  .withMessage('code is required');
+
+const otpAltValidator = body('otp')
+  .optional()
+  .trim()
+  .notEmpty()
+  .withMessage('otp is required');
+
 /**
  * POST /api/otp/send
- * Server-to-server OTP delivery via WhatsApp.
  *
- * Body: { phone, code, clientId?, message? }
- * Auth: X-Service-Key or Bearer OTP_SERVICE_SECRET
+ * Body: { phone, code | otp, clientId?, message? }
+ * Auth: Bearer WHATSAPP_NODE_TOKEN (JWT) OR X-Service-Key OTP_SERVICE_SECRET
  */
 router.post(
   '/send',
-  serviceAuthMiddleware,
+  otpAuthMiddleware,
   [
     body('phone').trim().notEmpty().withMessage('phone is required'),
-    body('code').trim().notEmpty().withMessage('code is required')
+    otpCodeValidator,
+    otpAltValidator
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -76,16 +101,21 @@ router.post(
       return res.status(400).json({ ok: false, errors: errors.array() });
     }
 
+    const code = String(req.body.code || req.body.otp || '').trim();
+    if (!code) {
+      return res.status(400).json({ ok: false, error: 'code or otp is required' });
+    }
+
     try {
       const phone = normalizePhone(req.body.phone).replace('@c.us', '');
-      const code = String(req.body.code).trim();
-      const dbClient = await resolveOtpClient(req.body.clientId);
+      const userId = req.user?._id || null;
+      const dbClient = await resolveOtpClient(req.body.clientId, userId);
 
       if (!dbClient) {
         return res.status(503).json({
           ok: false,
           error:
-            'No connected WhatsApp client available for OTP. Connect a client or set OTP_DEFAULT_CLIENT_ID.'
+            'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
         });
       }
 

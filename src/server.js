@@ -74,16 +74,24 @@ app.use('/api/otp',       otpRoutes);
 app.use('/api/logs',      logRoutes);
 app.use('/api/admin',     adminRoutes);
 
-app.get('/api/health', (_req, res) =>
-  res.json({
+app.get('/api/health', (_req, res) => {
+  const serviceKey = Boolean(String(process.env.OTP_SERVICE_SECRET || '').trim());
+  const jwtAuth = Boolean(String(process.env.JWT_SECRET || '').trim());
+  return res.json({
     status: 'ok',
     timestamp: new Date(),
     otp: {
-      configured: Boolean(String(process.env.OTP_SERVICE_SECRET || '').trim()),
-      endpoint: 'POST /api/otp/send'
+      configured: serviceKey || jwtAuth,
+      serviceKeyConfigured: serviceKey,
+      jwtAuthAvailable: jwtAuth,
+      endpoint: 'POST /api/otp/send',
+      auth: [
+        ...(jwtAuth ? ['Authorization: Bearer <WHATSAPP_NODE_TOKEN>'] : []),
+        ...(serviceKey ? ['X-Service-Key: <OTP_SERVICE_SECRET>'] : [])
+      ]
     }
-  })
-);
+  });
+});
 
 const getQrCodeBuffer = (dataUrl) => {
   if (typeof dataUrl !== 'string') return null;
