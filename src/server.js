@@ -29,8 +29,10 @@ process.on('unhandledRejection', (reason) => {
   const msg = String(reason?.message || reason || '').toLowerCase();
   if (
     msg.includes('execution context was destroyed') ||
+    msg.includes('detached frame') ||
     msg.includes('protocol error') ||
-    msg.includes('target closed')
+    msg.includes('target closed') ||
+    msg.includes('session closed')
   ) {
     console.warn('Puppeteer navigation noise (usually during QR/login):', reason?.message || reason);
     return;

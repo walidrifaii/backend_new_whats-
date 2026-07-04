@@ -36,17 +36,25 @@ const enrichClientWithLiveStatus = async (client) => {
   const livePhone = wClient?.info?.wid?.user || null;
 
   let status = client.status;
+  let qrCode = client.qrCode;
+
   if (live && livePhone && status !== 'connected') {
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId: sessionClientId },
       { status: 'connected', phone: livePhone, qrCode: null, lastConnected: new Date() }
     );
     status = 'connected';
+    qrCode = null;
+  } else if (live && !livePhone && ['qr_ready', 'initializing'].includes(status)) {
+    // Phone may show linked while server waits for whatsapp-web.js `ready`
+    status = 'authenticating';
+    qrCode = null;
   }
 
   return {
     ...client,
     status,
+    qrCode,
     liveConnected: live,
     livePhone: livePhone || client.phone || null
   };
