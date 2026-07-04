@@ -26,6 +26,15 @@ const { resumeInterruptedJobs } = require('./services/messageJobQueue');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '').toLowerCase();
+  if (
+    msg.includes('execution context was destroyed') ||
+    msg.includes('protocol error') ||
+    msg.includes('target closed')
+  ) {
+    console.warn('Puppeteer navigation noise (usually during QR/login):', reason?.message || reason);
+    return;
+  }
   console.error('Unhandled promise rejection:', reason);
 });
 process.on('uncaughtException', (error) => {

@@ -192,16 +192,22 @@ const isProfileLockError = (err) => {
   );
 };
 
-/** Completely wipes session data. Only used for forceReauth / sessionMissing. */
+/** Completely wipes session data. Only used for forceReauth / sessionMissing / LOGOUT. */
 const clearClientSessionData = (clientId) => {
-  const dir = getProfileDir(clientId);
-  try {
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
+  clearChromiumLocks(clientId);
+  const dirs = [
+    getProfileDir(clientId),
+    path.join(SESSIONS_DIR, clientId),
+    path.join(SESSIONS_DIR, `session-${clientId}`)
+  ].filter((d, i, arr) => fs.existsSync(d) && arr.indexOf(d) === i);
+
+  for (const dir of dirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
       console.log(`🗑️  Cleared session for ${clientId}`);
+    } catch (e) {
+      console.error(`Failed to clear session for ${clientId}:`, e.message);
     }
-  } catch (e) {
-    console.error(`Failed to clear session for ${clientId}:`, e.message);
   }
 };
 
@@ -414,7 +420,8 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
 
   let initSettled      = false;
   let initTimeoutHandle = null;
-  let readyHandled     = false;
+  let readyHandled         = false;
+  let authenticatedHandled = false;
   let instanceAborted  = false;
 
   const settleInit = () => {
@@ -520,7 +527,13 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     }
   });
 
+  wClient.on('loading_screen', (percent, message) => {
+    console.log(`⏳ ${clientId}: loading ${percent}% — ${message || 'syncing'}`);
+  });
+
   wClient.on('authenticated', async () => {
+    if (authenticatedHandled) return;
+    authenticatedHandled = true;
     console.log(`🔑 ${clientId}: QR scanned — waiting for WhatsApp ready...`);
     await WhatsAppClientModel.findOneAndUpdate(
       { clientId },
@@ -572,9 +585,9 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     clearQrMeta(clientId);
     finishInitializing(clientId);
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
-    activeClients.delete(clientId);
 
     if (shouldKeepConnectedOnDisconnect(clientId)) {
+      activeClients.delete(clientId);
       console.log(`💾 ${clientId}: deploy shutdown — keeping connected status for auto-restore`);
       clientsSkippingDisconnectEmail.delete(clientId);
       return;
@@ -584,8 +597,17 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     clientsSkippingDisconnectEmail.delete(clientId);
 
     const logout = isLogoutDisconnect(reason);
+
+    // Stop Chromium before deleting profile dirs (prevents ENOTEMPTY on Cache_Data).
+    try {
+      await wClient.destroy();
+    } catch (_) {}
+    activeClients.delete(clientId);
+    clearChromiumLocks(clientId);
+
     if (logout) {
       console.warn(`🗑️  ${clientId}: clearing expired session after ${reason}`);
+      await sleep(500);
       clearClientSessionData(clientId);
     }
 
