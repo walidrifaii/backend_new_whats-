@@ -74,7 +74,16 @@ app.use('/api/otp',       otpRoutes);
 app.use('/api/logs',      logRoutes);
 app.use('/api/admin',     adminRoutes);
 
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date() }));
+app.get('/api/health', (_req, res) =>
+  res.json({
+    status: 'ok',
+    timestamp: new Date(),
+    otp: {
+      configured: Boolean(String(process.env.OTP_SERVICE_SECRET || '').trim()),
+      endpoint: 'POST /api/otp/send'
+    }
+  })
+);
 
 const getQrCodeBuffer = (dataUrl) => {
   if (typeof dataUrl !== 'string') return null;
