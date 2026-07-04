@@ -27,7 +27,9 @@ ENV SESSIONS_DIR=/app/sessions
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production
+# Use npm install (not npm ci) so deploy works when package-lock.json lags package.json.
+# Prefer committing an updated package-lock.json for reproducible builds.
+RUN npm install --omit=dev --no-audit --no-fund
 COPY . .
 
 RUN mkdir -p sessions uploads
