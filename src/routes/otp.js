@@ -147,11 +147,11 @@ router.post(
           ? String(req.body.message).trim()
           : buildOtpMessage(code);
 
-      const minAck = parseInt(process.env.OTP_MIN_ACK || '1', 10);
+      const minAck = parseInt(process.env.OTP_MIN_ACK || '2', 10);
       const result = await sendMessage(sessionClientId, phone, text, {
         requireRegistered: true,
-        waitForAck: Number.isFinite(minAck) ? minAck : 1,
-        waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '20000', 10)
+        waitForAck: Number.isFinite(minAck) ? minAck : 2,
+        waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '30000', 10)
       });
       const messageId = result?.id?._serialized || null;
       const chatId = result?._deliveryMeta?.chatId || null;

@@ -888,16 +888,16 @@ const sendTextMessage = async (wClient, phone, message) => {
   return { result, chatId: cus };
 };
 
-/** Wait for message_ack event; fall back to checking outgoing messages in the chat. */
-const confirmMessageInChat = async (wClient, chatId, messageId) => {
-  if (!messageId) return false;
+/** Wait for message_ack event; poll chat history for updated ack levels. */
+const fetchOutgoingMessageFromChat = async (wClient, chatId, messageId) => {
+  if (!messageId) return null;
   try {
     const chat = await wClient.getChatById(chatId);
-    const messages = await chat.fetchMessages({ limit: 20 });
-    return messages.some((m) => m.id?._serialized === messageId && m.fromMe);
+    const messages = await chat.fetchMessages({ limit: 25 });
+    return messages.find((m) => m.id?._serialized === messageId && m.fromMe) || null;
   } catch (e) {
-    console.warn(`confirmMessageInChat(${chatId}) failed:`, e.message);
-    return false;
+    console.warn(`fetchOutgoingMessageFromChat(${chatId}) failed:`, e.message);
+    return null;
   }
 };
 
@@ -912,6 +912,12 @@ const waitForMessageAck = (wClient, message, chatId, minAck = ACK_SERVER, timeou
   }
 
   const readAck = () => (typeof message.ack === 'number' ? message.ack : ACK_PENDING);
+
+  const applyAck = (ack) => {
+    if (typeof ack === 'number') message.ack = ack;
+    return ack;
+  };
+
   const initialAck = readAck();
   if (initialAck === ACK_ERROR) {
     return Promise.reject(new Error('WhatsApp rejected the message (delivery error)'));
@@ -926,23 +932,47 @@ const waitForMessageAck = (wClient, message, chatId, minAck = ACK_SERVER, timeou
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(pollTimer);
       wClient.removeListener('message_ack', onAck);
       fn(value);
     };
 
+    const checkAck = (ack) => {
+      const level = applyAck(ack);
+      if (level === ACK_ERROR) {
+        finish(reject, new Error('WhatsApp rejected the message (delivery error)'));
+        return true;
+      }
+      if (level >= minAck) {
+        finish(resolve, level);
+        return true;
+      }
+      return false;
+    };
+
     const onAck = (msg, ack) => {
       if (msg?.id?._serialized !== msgId) return;
-      message.ack = ack;
-      if (ack === ACK_ERROR) {
-        finish(reject, new Error('WhatsApp rejected the message (delivery error)'));
-      } else if (ack >= minAck) {
-        finish(resolve, ack);
-      }
+      checkAck(ack);
     };
 
     wClient.on('message_ack', onAck);
 
+    const pollTimer = setInterval(async () => {
+      if (settled) return;
+      if (checkAck(readAck())) return;
+
+      const fromChat = await fetchOutgoingMessageFromChat(wClient, chatId, msgId);
+      if (fromChat && typeof fromChat.ack === 'number') {
+        checkAck(fromChat.ack);
+      }
+    }, 2000);
+
     const timer = setTimeout(async () => {
+      const fromChat = await fetchOutgoingMessageFromChat(wClient, chatId, msgId);
+      if (fromChat && typeof fromChat.ack === 'number') {
+        applyAck(fromChat.ack);
+      }
+
       const finalAck = readAck();
       if (finalAck >= minAck) {
         finish(resolve, finalAck);
@@ -953,12 +983,16 @@ const waitForMessageAck = (wClient, message, chatId, minAck = ACK_SERVER, timeou
         return;
       }
 
-      const inChat = await confirmMessageInChat(wClient, chatId, msgId);
-      if (inChat) {
-        console.warn(
-          `⚠️ message_ack not received for ${msgId}; outgoing message found in chat ${chatId}`
+      const digits = phoneDigitsOnly(chatId);
+      if (finalAck === ACK_SERVER && minAck >= ACK_DEVICE) {
+        finish(
+          reject,
+          new Error(
+            `Message reached WhatsApp servers (ack=1) but was NOT delivered to phone ${digits}. ` +
+              `On sender ${wClient.info?.wid?.user || 'n/a'}, open chat with ${digits} and check for a failed message. ` +
+              `Try sending "hi" manually from the sender phone first, then retry OTP.`
+          )
         );
-        finish(resolve, ACK_SERVER);
         return;
       }
 
