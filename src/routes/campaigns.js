@@ -226,19 +226,35 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
     }
 
     if (isOtpCampaign(campaign)) {
-      const result = await startCampaign(campaign._id, { wait: true });
-      if (!result.ok) {
-        return res.status(503).json({
-          ok: false,
-          error: result.error || 'OTP delivery failed',
+      const shouldWait =
+        req.query.wait === '1' ||
+        req.query.wait === 'true' ||
+        req.body?.wait === true;
+
+      if (shouldWait) {
+        const result = await startCampaign(campaign._id, { wait: true });
+        if (!result.ok) {
+          return res.status(503).json({
+            ok: false,
+            error: result.error || 'OTP delivery failed',
+            campaign: formatCampaign(result.campaign, client)
+          });
+        }
+        return res.json({
+          ok: true,
+          message: 'Campaign started',
+          campaignId: campaign._id,
           campaign: formatCampaign(result.campaign, client)
         });
       }
+
+      await startCampaign(campaign._id);
       return res.json({
         ok: true,
-        message: 'Campaign started',
+        message: 'Campaign started (async)',
+        async: true,
         campaignId: campaign._id,
-        campaign: formatCampaign(result.campaign, client)
+        campaign: formatCampaign(campaign, client)
       });
     }
 

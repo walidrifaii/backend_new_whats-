@@ -16,6 +16,12 @@ const getOtpExpiresMinutes = () => {
   return Number.isFinite(n) && n > 0 ? n : 5;
 };
 
+/** Shorter than WA_SEND_READY_WAIT_MS so Laravel Http::timeout(20) does not fire first. */
+const getOtpSendReadyWaitMs = () => {
+  const n = parseInt(process.env.OTP_SEND_READY_WAIT_MS || '15000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 15000;
+};
+
 const buildOtpMessage = (code) => {
   const template = String(
     process.env.OTP_MESSAGE_TEMPLATE ||
@@ -66,7 +72,7 @@ const ensureClientReadyForSend = async (sessionClientId) => {
   if (!isClientConnected(sessionClientId)) {
     console.log(`⏳ OTP: waiting for WhatsApp client ${sessionClientId} to come online...`);
   }
-  await waitForClientReady(sessionClientId);
+  await waitForClientReady(sessionClientId, getOtpSendReadyWaitMs());
 };
 
 const otpCodeValidator = body('code')
