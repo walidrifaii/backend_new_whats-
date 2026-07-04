@@ -769,8 +769,29 @@ const isRetryableSendError = (err) => {
     msg.includes('protocol error') ||
     msg.includes('target closed') ||
     msg.includes('session closed') ||
-    msg.includes('cannot read properties of undefined')
+    msg.includes('cannot read properties of undefined') ||
+    msg.includes('lid is missing') ||
+    msg.includes('chat table')
   );
+};
+
+/** Resolve phone → WhatsApp chat id (@c.us or @lid) via getNumberId when available. */
+const resolveChatId = async (wClient, phone) => {
+  const raw = String(phone || '').replace('@c.us', '').replace('@lid', '').trim();
+  const digits = normalizePhone(raw).replace('@c.us', '');
+
+  if (typeof wClient.getNumberId === 'function') {
+    try {
+      const numberId = await wClient.getNumberId(digits);
+      if (numberId?._serialized) {
+        return numberId._serialized;
+      }
+    } catch (e) {
+      console.warn(`getNumberId failed for ${digits}:`, e.message);
+    }
+  }
+
+  return digits.includes('@') ? digits : `${digits}@c.us`;
 };
 
 /** Wait until whatsapp-web.js reports CONNECTED and wid is available (avoids getChat races). */
@@ -818,17 +839,18 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
     throw new Error(`Client ${clientId} is not connected`);
   }
 
-  const chatId = phone.includes('@c.us') ? phone : `${phone}@c.us`;
   const mediaUrl = opts?.mediaUrl && String(opts.mediaUrl).trim()
     ? String(opts.mediaUrl).trim()
     : null;
 
   const maxAttempts = getSendMaxRetries();
   let lastError;
+  let chatId = phone.includes('@') ? phone : `${normalizePhone(phone).replace('@c.us', '')}@c.us`;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const wClient = await waitForClientReady(clientId, getSendReadyWaitMs());
+      chatId = await resolveChatId(wClient, phone);
 
       let result;
       if (mediaUrl) {
