@@ -30,8 +30,35 @@ const logResult = (context, result, email, clientId) => {
   );
 };
 
+const getNotifyRecipients = async (dbClient) => {
+  const adminEmail = String(
+    process.env.WHATSAPP_DISCONNECT_NOTIFY_EMAIL || ''
+  ).trim() || String(process.env.MAIL_FROM_ADDRESS || '').trim();
+
+  const sendToOwner =
+    String(process.env.WHATSAPP_DISCONNECT_EMAIL_TO_OWNER || 'false').toLowerCase() === 'true';
+
+  const user = await User.findById(dbClient.userId);
+  const recipients = new Set();
+
+  if (adminEmail) recipients.add(adminEmail);
+  if (sendToOwner && user?.email) recipients.add(String(user.email).trim());
+
+  if (recipients.size === 0 && user?.email) {
+    recipients.add(String(user.email).trim());
+  }
+
+  return {
+    emails: [...recipients],
+    user,
+    ownerEmail: user?.email || null
+  };
+};
+
 /**
- * Email the client owner when a WhatsApp session goes offline unexpectedly.
+ * Email when a WhatsApp session goes offline unexpectedly.
+ * Default recipient: MAIL_FROM_ADDRESS / WHATSAPP_DISCONNECT_NOTIFY_EMAIL (admin).
+ * Set WHATSAPP_DISCONNECT_EMAIL_TO_OWNER=true to also email the client owner.
  * @param {'disconnected'|'auth_failure'} eventType
  */
 const sendWhatsAppDisconnectedEmail = async ({
@@ -48,9 +75,9 @@ const sendWhatsAppDisconnectedEmail = async ({
     return { ok: false, reason: 'client_not_found' };
   }
 
-  const user = await User.findById(dbClient.userId);
-  if (!user?.email) {
-    return { ok: false, reason: 'missing_user_or_email' };
+  const { emails, user, ownerEmail } = await getNotifyRecipients(dbClient);
+  if (!emails.length) {
+    return { ok: false, reason: 'missing_notify_email' };
   }
 
   const notifyCheck = shouldNotify(dbClient.userId, clientId);
@@ -64,39 +91,41 @@ const sendWhatsAppDisconnectedEmail = async ({
   }
 
   const from = mailFrom || process.env.SMTP_FROM || process.env.MAIL_FROM_ADDRESS || process.env.SMTP_USER;
-  const displayName = user.name || 'User';
+  const displayName = user?.name || 'User';
   const clientLabel = dbClient.name || clientId;
   const phone = dbClient.phone ? ` (${dbClient.phone})` : '';
   const reasonText = reason ? `\nReason: ${reason}` : '';
   const isAuthFailure = eventType === 'auth_failure';
+  const ownerLine = ownerEmail ? `\nAccount owner: ${ownerEmail}` : '';
 
   const subject = isAuthFailure
     ? `WhatsApp auth failed — ${clientLabel}`
     : `WhatsApp disconnected — ${clientLabel}`;
 
   const bodyIntro = isAuthFailure
-    ? `Your WhatsApp client "${clientLabel}"${phone} failed authentication and was logged out.`
-    : `Your WhatsApp client "${clientLabel}"${phone} was disconnected from the server.`;
+    ? `WhatsApp client "${clientLabel}"${phone} failed authentication and was logged out.`
+    : `WhatsApp client "${clientLabel}"${phone} was disconnected from the server.`;
 
   const actionLine =
-    'Please open your dashboard and reconnect the client (scan QR if required) to resume sending messages.';
+    'Please open the dashboard and reconnect the client (scan QR if required) to resume sending messages.';
 
   try {
     await transporter.sendMail({
       from,
-      to: user.email,
+      to: emails.join(', '),
       subject,
-      text: `Hello ${displayName},\n\n${bodyIntro}${reasonText}\n\n${actionLine}\n\nRegards,\nWhatsApp Marketing SaaS`,
+      text: `Hello,\n\n${bodyIntro}${ownerLine}${reasonText}\n\n${actionLine}\n\nRegards,\nWhatsApp Marketing SaaS`,
       html: `
-        <p>Hello ${displayName},</p>
+        <p>Hello,</p>
         <p>${bodyIntro}</p>
+        ${ownerEmail ? `<p><strong>Account owner:</strong> ${String(ownerEmail).replace(/</g, '&lt;')}</p>` : ''}
         ${reason ? `<p><strong>Reason:</strong> ${String(reason).replace(/</g, '&lt;')}</p>` : ''}
         <p>${actionLine}</p>
         <p>Regards,<br/>WhatsApp Marketing SaaS</p>
       `
     });
 
-    return { ok: true, reason: 'sent' };
+    return { ok: true, reason: 'sent', emails };
   } catch (err) {
     return { ok: false, reason: err.message || 'smtp_send_failed' };
   }
@@ -104,15 +133,8 @@ const sendWhatsAppDisconnectedEmail = async ({
 
 const notifyWhatsAppDisconnected = ({ clientId, reason, eventType }) => {
   sendWhatsAppDisconnectedEmail({ clientId, reason, eventType })
-    .then(async (result) => {
-      let email = 'n/a';
-      try {
-        const dbClient = await WhatsAppClientModel.findOne({ clientId });
-        if (dbClient) {
-          const user = await User.findById(dbClient.userId);
-          email = user?.email || 'n/a';
-        }
-      } catch (_) {}
+    .then((result) => {
+      const email = result?.emails?.join(', ') || 'n/a';
       logResult(eventType, result, email, clientId);
     })
     .catch((err) => logResult(eventType, { ok: false, reason: err.message }, 'n/a', clientId));
