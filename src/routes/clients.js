@@ -3,7 +3,7 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const { createWhatsAppClient, destroyClient, isClientConnected, isQrBlocked } = require('../services/whatsappManager');
+const { createWhatsAppClient, destroyClient, isClientConnected, isQrBlocked, getClient } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildClientQrToken } = require('../utils/qrShare');
 
@@ -26,6 +26,32 @@ const buildQrSharePayload = (req, clientId) => {
   };
 };
 
+/** DB status + whether Chromium session is actually live in memory on this server. */
+const enrichClientWithLiveStatus = async (client) => {
+  if (!client) return client;
+
+  const sessionClientId = client.clientId;
+  const live = isClientConnected(sessionClientId);
+  const wClient = live ? getClient(sessionClientId) : null;
+  const livePhone = wClient?.info?.wid?.user || null;
+
+  let status = client.status;
+  if (live && livePhone && status !== 'connected') {
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId: sessionClientId },
+      { status: 'connected', phone: livePhone, qrCode: null, lastConnected: new Date() }
+    );
+    status = 'connected';
+  }
+
+  return {
+    ...client,
+    status,
+    liveConnected: live,
+    livePhone: livePhone || client.phone || null
+  };
+};
+
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
@@ -33,7 +59,8 @@ router.get('/', authMiddleware, async (req, res) => {
       { userId: req.user._id, isActive: true },
       { sort: { createdAt: -1 } }
     );
-    res.json({ clients });
+    const enriched = await Promise.all(clients.map((c) => enrichClientWithLiveStatus(c)));
+    res.json({ clients: enriched });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -205,7 +232,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    res.json({ client });
+    res.json({ client: await enrichClientWithLiveStatus(client) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -520,6 +520,15 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     }
   });
 
+  wClient.on('authenticated', async () => {
+    console.log(`🔑 ${clientId}: QR scanned — waiting for WhatsApp ready...`);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'authenticating', qrCode: null }
+    );
+    emitToClient(clientId, 'authenticated', { clientId });
+  });
+
   wClient.on('ready', async () => {
     if (readyHandled) return;
     readyHandled = true;
