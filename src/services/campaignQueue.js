@@ -104,6 +104,28 @@ const shouldSkipBalanceForCampaign = (campaign) =>
   isOtpCampaign(campaign) ||
   String(process.env.OTP_CAMPAIGN_SKIP_BALANCE || 'true').toLowerCase() === 'true';
 
+/** OTP campaign sends use same delivery checks as /api/otp/send (relaxed ack by default). */
+const getOtpCampaignSendOpts = (campaign) => {
+  if (!isOtpCampaign(campaign)) return null;
+  const minAck = parseInt(
+    process.env.OTP_CAMPAIGN_MIN_ACK ?? process.env.OTP_MIN_ACK ?? '1',
+    10
+  );
+  const waitForAck = Number.isFinite(minAck) && minAck > 0 ? minAck : 0;
+  return {
+    requireRegistered: true,
+    waitForAck,
+    waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '30000', 10)
+  };
+};
+
+const mergeSendOpts = (campaign, mediaOpts) => {
+  const otpOpts = getOtpCampaignSendOpts(campaign);
+  if (!otpOpts) return mediaOpts;
+  if (!mediaOpts) return otpOpts;
+  return { ...otpOpts, ...mediaOpts };
+};
+
 const getCampaignSendDelay = (campaign) => {
   const minD = Number(campaign.minDelay);
   const maxD = Number(campaign.maxDelay);
@@ -226,11 +248,16 @@ const processCampaign = async (campaignId) => {
       let whatsappId = null;
 
       try {
-        const sendOpts =
+        const mediaOpts =
           campaign.mediaUrl && String(campaign.mediaUrl).trim()
             ? { mediaUrl: campaign.mediaUrl, mediaType: campaign.mediaType || null }
             : null;
-        const result = await sendMessage(clientId, phone, renderedMessage, sendOpts);
+        const result = await sendMessage(
+          clientId,
+          phone,
+          renderedMessage,
+          mergeSendOpts(campaign, mediaOpts)
+        );
         whatsappId = result?.id?._serialized || null;
         success = true;
         console.log(`✅ Sent to ${phone} for campaign ${campaignId}`);

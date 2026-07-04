@@ -96,7 +96,15 @@ app.get('/api/health', (_req, res) => {
       configured: serviceKey || jwtAuth,
       serviceKeyConfigured: serviceKey,
       jwtAuthAvailable: jwtAuth,
-      endpoint: 'POST /api/otp/send',
+      endpoints: {
+        direct: 'POST /api/otp/send',
+        campaign: 'POST /api/otp/send-campaign',
+        legacy: [
+          'POST /api/campaigns (name: otp_<uuid>)',
+          'POST /api/contacts/{campaignId}/add',
+          'POST /api/campaigns/{campaignId}/start'
+        ]
+      },
       auth: [
         ...(jwtAuth ? ['Authorization: Bearer <WHATSAPP_NODE_TOKEN>'] : []),
         ...(serviceKey ? ['X-Service-Key: <OTP_SERVICE_SECRET>'] : [])

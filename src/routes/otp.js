@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
+const { v4: uuidv4 } = require('uuid');
+const Campaign = require('../models/Campaign');
+const Contact = require('../models/Contact');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
+const { startCampaign } = require('../services/campaignQueue');
 const {
   sendMessage,
   isClientConnected,
@@ -187,6 +191,110 @@ router.post(
         ok: false,
         error: err.message,
         channel: 'whatsapp_node'
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/otp/send-campaign
+ * Legacy Laravel 3-step flow in one call: create otp_* campaign → add contact → start (sync).
+ * Body: { phone, code | otp, clientId?, message? }
+ */
+router.post(
+  '/send-campaign',
+  otpAuthMiddleware,
+  [
+    body('phone').trim().notEmpty().withMessage('phone is required'),
+    otpCodeValidator,
+    otpAltValidator
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ ok: false, errors: errors.array() });
+    }
+
+    const code = String(req.body.code || req.body.otp || '').trim();
+    if (!code) {
+      return res.status(400).json({ ok: false, error: 'code or otp is required' });
+    }
+
+    try {
+      const phone = normalizePhone(req.body.phone).replace('@c.us', '');
+      const userId = req.user?._id || null;
+      const dbClient = await resolveOtpClient(req.body.clientId, userId);
+
+      if (!dbClient) {
+        return res.status(503).json({
+          ok: false,
+          error:
+            'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
+        });
+      }
+
+      if (dbClient.status !== 'connected' || !isClientConnected(dbClient.clientId)) {
+        await ensureClientReadyForSend(dbClient.clientId);
+      }
+
+      const defaultTemplate = String(
+        process.env.OTP_MESSAGE_TEMPLATE ||
+          'Your verification code is: {code}. Valid for {minutes} minutes. Do not share this code.'
+      );
+      const messageTemplate =
+        req.body.message != null && String(req.body.message).trim()
+          ? String(req.body.message).trim()
+          : defaultTemplate;
+
+      const campaign = await Campaign.create({
+        userId: dbClient.userId,
+        clientId: dbClient._id,
+        name: `otp_${uuidv4()}`,
+        message: messageTemplate.includes('{code}')
+          ? messageTemplate
+          : `${messageTemplate} {code}`,
+        minDelay: 0,
+        maxDelay: 0,
+        totalContacts: 1,
+        status: 'draft'
+      });
+
+      await Contact.create({
+        userId: dbClient.userId,
+        campaignId: campaign._id,
+        phone,
+        name: '',
+        variables: { code }
+      });
+
+      console.log(`📋 OTP campaign ${campaign._id} created for ${phone}`);
+
+      const result = await startCampaign(campaign._id, { wait: true });
+      if (!result.ok) {
+        return res.status(503).json({
+          ok: false,
+          error: result.error || 'OTP campaign delivery failed',
+          channel: 'whatsapp_node_campaign',
+          campaignId: campaign._id
+        });
+      }
+
+      console.log(`✅ OTP campaign sent to ${phone} via ${dbClient.clientId} (campaign ${campaign._id})`);
+
+      return res.json({
+        ok: true,
+        message: 'OTP sent via campaign.',
+        channel: 'whatsapp_node_campaign',
+        campaignId: campaign._id,
+        expires_in: getOtpExpiresMinutes() * 60,
+        clientId: dbClient.clientId
+      });
+    } catch (err) {
+      console.error(`❌ OTP campaign send failed:`, err.message);
+      return res.status(503).json({
+        ok: false,
+        error: err.message,
+        channel: 'whatsapp_node_campaign'
       });
     }
   }
