@@ -819,34 +819,89 @@ const resolveChatId = async (wClient, phone, { requireRegistered = false } = {})
   return `${digits}@c.us`;
 };
 
-/** Wait until WhatsApp reports at least minAck (1=server, 2=delivered to device). */
-const waitForMessageAck = async (message, minAck = ACK_SERVER, timeoutMs = 12000) => {
+/** Wait for message_ack event; fall back to checking outgoing messages in the chat. */
+const confirmMessageInChat = async (wClient, chatId, messageId) => {
+  if (!messageId) return false;
+  try {
+    const chat = await wClient.getChatById(chatId);
+    const messages = await chat.fetchMessages({ limit: 20 });
+    return messages.some((m) => m.id?._serialized === messageId && m.fromMe);
+  } catch (e) {
+    console.warn(`confirmMessageInChat(${chatId}) failed:`, e.message);
+    return false;
+  }
+};
+
+const waitForMessageAck = (wClient, message, chatId, minAck = ACK_SERVER, timeoutMs = 12000) => {
   if (!message) {
-    throw new Error('No message object returned from WhatsApp');
+    return Promise.reject(new Error('No message object returned from WhatsApp'));
   }
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ack = typeof message.ack === 'number' ? message.ack : ACK_PENDING;
-    if (ack === ACK_ERROR) {
-      throw new Error('WhatsApp rejected the message (delivery error)');
-    }
-    if (ack >= minAck) {
-      return ack;
-    }
-    await sleep(400);
+  const msgId = message.id?._serialized;
+  if (!msgId) {
+    return Promise.reject(new Error('WhatsApp returned a message without an id'));
   }
 
-  const finalAck = typeof message.ack === 'number' ? message.ack : ACK_PENDING;
-  if (finalAck === ACK_ERROR) {
-    throw new Error('WhatsApp rejected the message (delivery error)');
+  const readAck = () => (typeof message.ack === 'number' ? message.ack : ACK_PENDING);
+  const initialAck = readAck();
+  if (initialAck === ACK_ERROR) {
+    return Promise.reject(new Error('WhatsApp rejected the message (delivery error)'));
   }
-  if (finalAck < minAck) {
-    throw new Error(
-      `Message not confirmed by WhatsApp (ack=${finalAck}, need >=${minAck}). The number may be wrong or unreachable.`
-    );
+  if (initialAck >= minAck) {
+    return Promise.resolve(initialAck);
   }
-  return finalAck;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      wClient.removeListener('message_ack', onAck);
+      fn(value);
+    };
+
+    const onAck = (msg, ack) => {
+      if (msg?.id?._serialized !== msgId) return;
+      message.ack = ack;
+      if (ack === ACK_ERROR) {
+        finish(reject, new Error('WhatsApp rejected the message (delivery error)'));
+      } else if (ack >= minAck) {
+        finish(resolve, ack);
+      }
+    };
+
+    wClient.on('message_ack', onAck);
+
+    const timer = setTimeout(async () => {
+      const finalAck = readAck();
+      if (finalAck >= minAck) {
+        finish(resolve, finalAck);
+        return;
+      }
+      if (finalAck === ACK_ERROR) {
+        finish(reject, new Error('WhatsApp rejected the message (delivery error)'));
+        return;
+      }
+
+      const inChat = await confirmMessageInChat(wClient, chatId, msgId);
+      if (inChat) {
+        console.warn(
+          `⚠️ message_ack not received for ${msgId}; outgoing message found in chat ${chatId}`
+        );
+        finish(resolve, ACK_SERVER);
+        return;
+      }
+
+      finish(
+        reject,
+        new Error(
+          `Message not confirmed by WhatsApp (ack=${finalAck}, need >=${minAck}). ` +
+            `Check on sender phone ${wClient.info?.wid?.user || 'n/a'} that chat ${chatId} exists.`
+        )
+      );
+    }, timeoutMs);
+  });
 };
 
 /** Wait until whatsapp-web.js reports CONNECTED and wid is available (avoids getChat races). */
@@ -906,7 +961,7 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
     opts?.waitForAck !== undefined && opts?.waitForAck !== null
       ? Number(opts.waitForAck)
       : 0;
-  const waitForAckMs = parseEnvInt('OTP_ACK_WAIT_MS', Number(opts?.waitForAckMs) || 12000);
+  const waitForAckMs = parseEnvInt('OTP_ACK_WAIT_MS', Number(opts?.waitForAckMs) || 20000);
 
   const maxAttempts = getSendMaxRetries();
   let lastError;
@@ -939,12 +994,18 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
           throw new Error(`Media send failed: ${err.message}`);
         }
       } else {
-        result = await wClient.sendMessage(chatId, message);
+        try {
+          const chat = await wClient.getChatById(chatId);
+          result = await chat.sendMessage(message);
+        } catch (chatErr) {
+          console.warn(`getChatById/send failed for ${chatId}, using client.sendMessage:`, chatErr.message);
+          result = await wClient.sendMessage(chatId, message);
+        }
       }
 
       let deliveryAck = typeof result?.ack === 'number' ? result.ack : ACK_PENDING;
       if (waitForAck > 0) {
-        deliveryAck = await waitForMessageAck(result, waitForAck, waitForAckMs);
+        deliveryAck = await waitForMessageAck(wClient, result, chatId, waitForAck, waitForAckMs);
       }
 
       console.log(

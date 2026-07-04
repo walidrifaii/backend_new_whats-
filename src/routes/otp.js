@@ -151,7 +151,7 @@ router.post(
       const result = await sendMessage(sessionClientId, phone, text, {
         requireRegistered: true,
         waitForAck: Number.isFinite(minAck) ? minAck : 1,
-        waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '12000', 10)
+        waitForAckMs: parseInt(process.env.OTP_ACK_WAIT_MS || '20000', 10)
       });
       const messageId = result?.id?._serialized || null;
       const chatId = result?._deliveryMeta?.chatId || null;
