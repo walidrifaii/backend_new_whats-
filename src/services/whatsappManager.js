@@ -20,6 +20,8 @@ const qrMeta = new Map();
 const initializingClients = new Set();
 const clientInitChains = new Map();
 const scheduledRetryTimers = new Map();
+/** After QR abandon, block auto re-init until user explicitly resets */
+const qrBlockedUntil = new Map();
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
@@ -31,9 +33,10 @@ const getInitMaxRetries       = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRI
 const getRetryBaseDelayMs     = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
 const getRetryMaxDelayMs      = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
 const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE_MS', 20000));
-// Backup safety net — primary stop is WA_QR_MAX_REFRESHES (default: first QR + one retry).
+// Backup safety net — primary stop is WA_QR_MAX_REFRESHES (default: 5 displayed QR codes).
 const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 180000));
-const getQrMaxRefreshes       = () => Math.max(1, parseEnvInt('WA_QR_MAX_REFRESHES', 2));
+const getQrMaxRefreshes       = () => Math.max(3, parseEnvInt('WA_QR_MAX_REFRESHES', 5));
+const getQrBlockMs            = () => Math.max(60000, parseEnvInt('WA_QR_BLOCK_MS', 300000));
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 const getBootRestoreDelayMs   = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 20000));
@@ -241,6 +244,15 @@ const finishInitializing = (clientId) => {
   cancelScheduledRetry(clientId);
 };
 
+const isQrBlocked = (clientId) => {
+  const until = qrBlockedUntil.get(clientId) || 0;
+  return Date.now() < until;
+};
+
+const blockQrReinit = (clientId) => {
+  qrBlockedUntil.set(clientId, Date.now() + getQrBlockMs());
+};
+
 const clearQrMeta = (clientId) => {
   const meta = qrMeta.get(clientId);
   if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
@@ -280,13 +292,16 @@ const releaseQrPendingClient = async (clientId, reason) => {
 
   clearQrMeta(clientId);
   finishInitializing(clientId);
+  blockQrReinit(clientId);
+  clearClientSessionData(clientId);
+
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
-    { status: 'disconnected', qrCode: null }
+    { status: 'disconnected', qrCode: null, phone: '' }
   );
   emitToClient(clientId, 'qr_expired', {
     clientId,
-    message: 'QR timed out without scan. Reconnect from the dashboard when ready.',
+    message: 'QR timed out without scan. Click Reconnect (or connect with reset=1) and scan within a few minutes.',
   });
 };
 
@@ -334,6 +349,17 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   const maxRetries = getInitMaxRetries();
 
   cancelScheduledRetry(clientId);
+
+  if (!forceReauth && isQrBlocked(clientId)) {
+    console.log(
+      `⏸️  ${clientId}: QR re-init blocked — use POST /api/clients/:id/connect?reset=1 to scan again`
+    );
+    return null;
+  }
+
+  if (forceReauth) {
+    qrBlockedUntil.delete(clientId);
+  }
 
   if (initializingClients.has(clientId) || activeClients.has(clientId)) {
     const existing = activeClients.get(clientId);
@@ -455,25 +481,27 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     settleInit();
 
     const meta = getQrMeta(clientId);
-    meta.refreshCount += 1;
     startQrPendingTimer(clientId);
+
+    const now = Date.now();
+    if (meta.handling || (meta.refreshCount > 0 && now - meta.lastHandledAt < getQrThrottleMs())) {
+      return;
+    }
+
+    if (meta.refreshCount === 0 && sessionExistsOnDisk(clientId)) {
+      console.warn(
+        `⚠️  ${clientId}: QR despite saved session — clearing stale session; scan new QR`
+      );
+      clearClientSessionData(clientId);
+    }
+
+    meta.refreshCount += 1;
 
     if (meta.refreshCount > getQrMaxRefreshes()) {
       console.warn(
         `⏹️  ${clientId}: QR limit reached (${meta.refreshCount}/${getQrMaxRefreshes()}) — stopping Chromium`
       );
       await releaseQrPendingClient(clientId, `${meta.refreshCount} refreshes without scan`);
-      return;
-    }
-
-    if (meta.refreshCount === 1 && sessionExistsOnDisk(clientId)) {
-      console.warn(
-        `⚠️  ${clientId}: QR despite saved session — auth may be expired or another client uses this number`
-      );
-    }
-
-    const now = Date.now();
-    if (meta.handling || (meta.refreshCount > 1 && now - meta.lastHandledAt < getQrThrottleMs())) {
       return;
     }
 
@@ -486,6 +514,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
       meta.lastHandledAt = Date.now();
     } catch (e) {
       console.error(`QR error for ${clientId}:`, e);
+      meta.refreshCount = Math.max(0, meta.refreshCount - 1);
     } finally {
       meta.handling = false;
     }
@@ -956,5 +985,6 @@ module.exports = {
   waitForClientReady,
   initWhatsAppManager,
   isClientConnected,
+  isQrBlocked,
   activeClients,
 };

@@ -3,7 +3,7 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
+const { createWhatsAppClient, destroyClient, isClientConnected, isQrBlocked } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildClientQrToken } = require('../utils/qrShare');
 
@@ -125,7 +125,17 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
     }
 
     const shouldForceReauth =
-      req.query.reset === '1' || req.body?.forceReauth === true;
+      req.query.reset === '1' ||
+      req.body?.forceReauth === true ||
+      ['disconnected', 'auth_failure'].includes(client.status);
+
+    if (isQrBlocked(client.clientId) && !shouldForceReauth) {
+      return res.status(429).json({
+        error: 'QR scan timed out. Use reconnect with reset or wait a few minutes before trying again.',
+        clientId: client.clientId,
+        hint: 'POST /api/clients/:id/connect?reset=1'
+      });
+    }
 
     if (isClientConnected(client.clientId) && !shouldForceReauth) {
       return res.json({
@@ -148,7 +158,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       if (shouldForceReauth) {
         try {
           await withTimeout(
-            destroyClient(client.clientId),
+            destroyClient(client.clientId, { skipDisconnectEmail: true }),
             12000,
             `Destroy client timeout for ${client.clientId}`
           );
@@ -158,7 +168,9 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
       }
 
       try {
-      await   createWhatsAppClient(client.clientId);
+        await createWhatsAppClient(client.clientId, {
+          forceReauth: shouldForceReauth
+        });
       } catch (err) {
         console.error(`Init error for ${client.clientId}:`, err);
       }
