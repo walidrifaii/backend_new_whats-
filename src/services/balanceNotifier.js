@@ -22,12 +22,12 @@ const sendBalanceExhaustedEmail = async ({ userId, email, name }) => {
     return { ok: false, reason: notifyCheck.reason };
   }
 
-  const { transporter, reason } = getTransporter();
+  const { transporter, reason, from: mailFrom } = getTransporter();
   if (!transporter) {
     return { ok: false, reason };
   }
 
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const from = mailFrom || process.env.SMTP_FROM || process.env.MAIL_FROM_ADDRESS || process.env.SMTP_USER;
   const displayName = name || 'User';
 
   try {

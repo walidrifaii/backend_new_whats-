@@ -58,12 +58,12 @@ const sendWhatsAppDisconnectedEmail = async ({
     return { ok: false, reason: notifyCheck.reason };
   }
 
-  const { transporter, reason: smtpReason } = getTransporter();
+  const { transporter, reason: smtpReason, from: mailFrom } = getTransporter();
   if (!transporter) {
     return { ok: false, reason: smtpReason };
   }
 
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const from = mailFrom || process.env.SMTP_FROM || process.env.MAIL_FROM_ADDRESS || process.env.SMTP_USER;
   const displayName = user.name || 'User';
   const clientLabel = dbClient.name || clientId;
   const phone = dbClient.phone ? ` (${dbClient.phone})` : '';
@@ -104,8 +104,18 @@ const sendWhatsAppDisconnectedEmail = async ({
 
 const notifyWhatsAppDisconnected = ({ clientId, reason, eventType }) => {
   sendWhatsAppDisconnectedEmail({ clientId, reason, eventType })
-    .then((result) => logResult(eventType, result, null, clientId))
-    .catch((err) => logResult(eventType, { ok: false, reason: err.message }, null, clientId));
+    .then(async (result) => {
+      let email = 'n/a';
+      try {
+        const dbClient = await WhatsAppClientModel.findOne({ clientId });
+        if (dbClient) {
+          const user = await User.findById(dbClient.userId);
+          email = user?.email || 'n/a';
+        }
+      } catch (_) {}
+      logResult(eventType, result, email, clientId);
+    })
+    .catch((err) => logResult(eventType, { ok: false, reason: err.message }, 'n/a', clientId));
 };
 
 module.exports = {
