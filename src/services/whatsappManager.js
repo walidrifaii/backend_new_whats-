@@ -842,40 +842,124 @@ const resolveChatId = async (wClient, phone, { requireRegistered = false } = {})
   return cus;
 };
 
-/** Send text; prefer @c.us, fall back through getContactLidAndPhone only on LID errors. */
+const getPuppeteerPage = (wClient) => wClient?.pupPage || wClient?.page || null;
+
+const serializedJid = (wid, fallbackServer = 'c.us') => {
+  if (!wid) return null;
+  if (typeof wid === 'string') return wid;
+  if (wid._serialized) return wid._serialized;
+  if (wid.user) return `${wid.user}@${wid.server || fallbackServer}`;
+  return null;
+};
+
+/**
+ * Prime WhatsApp internal chat/LID tables before first message to a new contact.
+ * Uses WWebJS.enforceLidAndPnRetrieval + getChat (findOrCreateLatestChat).
+ */
+const prepLidAndPn = async (wClient, cus) => {
+  const page = getPuppeteerPage(wClient);
+  if (!page) return { phoneJid: cus, lidJid: null, method: 'no-page' };
+
+  try {
+    const out = await page.evaluate(async (jid) => {
+      const primeChat = async (id) => {
+        if (!id || !window.WWebJS?.getChat) return;
+        try {
+          await window.WWebJS.getChat(id, { getAsModel: false });
+        } catch (_) {
+          /* chat may not exist yet */
+        }
+      };
+
+      let phoneJid = jid;
+      let lidJid = null;
+      let method = 'prime-only';
+
+      if (window.WWebJS?.enforceLidAndPnRetrieval) {
+        method = 'enforceLidAndPnRetrieval';
+        const { lid, phone } = await window.WWebJS.enforceLidAndPnRetrieval(jid);
+        if (phone?._serialized) phoneJid = phone._serialized;
+        else if (phone?.user) phoneJid = `${phone.user}@${phone.server || 'c.us'}`;
+        if (lid?._serialized) lidJid = lid._serialized;
+        else if (lid?.user) lidJid = `${lid.user}@lid`;
+      }
+
+      for (const id of [phoneJid, jid, lidJid]) {
+        await primeChat(id);
+      }
+
+      return { phoneJid, lidJid, method };
+    }, cus);
+
+    console.log(
+      `📱 LID prep (${out.method}): phone=${out.phoneJid} lid=${out.lidJid || 'n/a'}`
+    );
+    return out;
+  } catch (e) {
+    console.warn('prepLidAndPn failed:', e.message);
+    return { phoneJid: cus, lidJid: null, method: 'error' };
+  }
+};
+
+/** Last-resort send through in-page WWebJS after findOrCreateLatestChat. */
+const sendTextViaWWebJSChat = async (wClient, chatId, message) => {
+  const page = getPuppeteerPage(wClient);
+  if (!page) throw new Error('WhatsApp browser page is not available');
+
+  const msgData = await page.evaluate(async (cid, text) => {
+    const chat = await window.WWebJS.getChat(cid, { getAsModel: false });
+    if (!chat) throw new Error(`Chat not found for ${cid}`);
+    const msg = await window.WWebJS.sendMessage(chat, text, {});
+    return {
+      id: msg?.id?._serialized || null,
+      ack: typeof msg?.ack === 'number' ? msg.ack : 0
+    };
+  }, chatId, message);
+
+  return {
+    id: { _serialized: msgData.id },
+    ack: msgData.ack
+  };
+};
+
+/** Send text; prep LID/chat table, then try phone JID, @c.us, @lid, and WWebJS fallback. */
 const sendTextMessage = async (wClient, phone, message) => {
   const digits = phoneDigitsOnly(phone);
   const cus = toCUsJid(digits);
+  const { phoneJid, lidJid } = await prepLidAndPn(wClient, cus);
 
-  try {
-    const result = await wClient.sendMessage(cus, message);
-    return { result, chatId: cus };
-  } catch (err) {
-    if (!isLidRelatedError(err)) throw err;
-    console.warn(`sendMessage(${cus}) LID error: ${err.message}`);
+  const targets = [...new Set([phoneJid, cus, lidJid].filter(Boolean))];
+  let lastError = null;
+
+  for (const target of targets) {
+    try {
+      const result = await wClient.sendMessage(target, message);
+      return { result, chatId: target };
+    } catch (err) {
+      lastError = err;
+      if (!isLidRelatedError(err)) throw err;
+      console.warn(`sendMessage(${target}) LID error: ${err.message}`);
+    }
   }
 
   if (typeof wClient.getContactLidAndPhone === 'function') {
     try {
       const mapping = await wClient.getContactLidAndPhone([cus]);
       const row = mapping?.[0];
-      const pn =
-        row?.pn?._serialized ||
-        (typeof row?.pn === 'string' ? row.pn : null);
-      const lid =
-        row?.lid?._serialized ||
-        (typeof row?.lid === 'string' ? row.lid : null);
-
-      const targets = [pn, cus, lid].filter((t) => t && typeof t === 'string');
-      const unique = [...new Set(targets)];
-
-      for (const target of unique) {
-        if (target.includes('@lid')) continue;
+      const extra = [
+        serializedJid(row?.pn),
+        serializedJid(row?.lid, 'lid'),
+        typeof row?.pn === 'string' ? row.pn : null,
+        typeof row?.lid === 'string' ? row.lid : null
+      ].filter(Boolean);
+      for (const target of [...new Set(extra)]) {
+        if (targets.includes(target)) continue;
         try {
-          console.log(`📱 LID fallback: retry send via ${target}`);
+          console.log(`📱 getContactLidAndPhone retry via ${target}`);
           const result = await wClient.sendMessage(target, message);
           return { result, chatId: target };
         } catch (e) {
+          lastError = e;
           console.warn(`sendMessage(${target}) failed:`, e.message);
         }
       }
@@ -884,8 +968,24 @@ const sendTextMessage = async (wClient, phone, message) => {
     }
   }
 
-  const result = await wClient.sendMessage(cus, message);
-  return { result, chatId: cus };
+  for (const target of targets) {
+    try {
+      console.log(`📱 WWebJS.sendMessage fallback via ${target}`);
+      const result = await sendTextViaWWebJSChat(wClient, target, message);
+      if (!result?.id?._serialized) {
+        throw new Error('WWebJS send returned no message id');
+      }
+      return { result, chatId: target };
+    } catch (e) {
+      lastError = e;
+      console.warn(`WWebJS.sendMessage(${target}) failed:`, e.message);
+    }
+  }
+
+  const hint =
+    `Cannot send to ${digits}: WhatsApp LID/chat table not ready. ` +
+    `On sender phone ${wClient.info?.wid?.user || 'n/a'}, open WhatsApp and manually send "hi" to +${digits}, then retry.`;
+  throw new Error(lastError?.message ? `${lastError.message}. ${hint}` : hint);
 };
 
 /** Wait for message_ack event; poll chat history for updated ack levels. */
@@ -1086,6 +1186,7 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
       let result;
       if (mediaUrl) {
         try {
+          await prepLidAndPn(wClient, toCUsJid(phoneDigitsOnly(phone)));
           const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
           if (!media?.data) {
             throw new Error('Media URL returned empty data');
