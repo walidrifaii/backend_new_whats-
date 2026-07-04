@@ -16,6 +16,10 @@ const clientsSkippingDisconnectEmail = new Set();
 
 // Per-client QR state — stuck unauthenticated clients keep Chromium alive and can OOM the server.
 const qrMeta = new Map();
+/** Prevent overlapping createWhatsAppClient / Chromium for the same clientId */
+const initializingClients = new Set();
+const clientInitChains = new Map();
+const scheduledRetryTimers = new Map();
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
@@ -209,12 +213,32 @@ const isRetryableError = (err) => {
     msg.includes('timeout')               ||
     msg.includes('target closed')         ||
     msg.includes('navigation')            ||
+    msg.includes('execution context')     ||
     msg.includes('browser')               ||
     msg.includes('websocket')             ||
     msg.includes('profile appears to be') ||
     msg.includes('singleton')             ||
-    msg.includes('failed to launch')
+    msg.includes('failed to launch')      ||
+    msg.includes('onqrchangedevent')
   );
+};
+
+const isLogoutDisconnect = (reason) => {
+  const r = String(reason || '').toUpperCase();
+  return r.includes('LOGOUT') || r.includes('UNPAIRED') || r.includes('UNAUTHORIZED');
+};
+
+const cancelScheduledRetry = (clientId) => {
+  const timer = scheduledRetryTimers.get(clientId);
+  if (timer) {
+    clearTimeout(timer);
+    scheduledRetryTimers.delete(clientId);
+  }
+};
+
+const finishInitializing = (clientId) => {
+  initializingClients.delete(clientId);
+  cancelScheduledRetry(clientId);
 };
 
 const clearQrMeta = (clientId) => {
@@ -255,6 +279,7 @@ const releaseQrPendingClient = async (clientId, reason) => {
   }
 
   clearQrMeta(clientId);
+  finishInitializing(clientId);
   await WhatsAppClientModel.findOneAndUpdate(
     { clientId },
     { status: 'disconnected', qrCode: null }
@@ -285,13 +310,42 @@ const startQrPendingTimer = (clientId) => {
  * @param {number}  [opts.attempt=1]            – internal retry counter
  */
 const createWhatsAppClient = async (clientId, opts = {}) => {
+  const prior = clientInitChains.get(clientId);
+  if (prior) {
+    try { await prior; } catch (_) {}
+    if (activeClients.has(clientId)) {
+      return activeClients.get(clientId);
+    }
+  }
+
+  const work = createWhatsAppClientInner(clientId, opts);
+  clientInitChains.set(clientId, work);
+  try {
+    return await work;
+  } finally {
+    if (clientInitChains.get(clientId) === work) {
+      clientInitChains.delete(clientId);
+    }
+  }
+};
+
+const createWhatsAppClientInner = async (clientId, opts = {}) => {
   const { forceReauth = false, sessionMissing = false, attempt = 1, restoring = false } = opts;
   const maxRetries = getInitMaxRetries();
 
-  if (activeClients.has(clientId)) {
-    console.log(`Client ${clientId} already active`);
-    return activeClients.get(clientId);
+  cancelScheduledRetry(clientId);
+
+  if (initializingClients.has(clientId) || activeClients.has(clientId)) {
+    const existing = activeClients.get(clientId);
+    if (existing) {
+      console.log(`Client ${clientId} already active`);
+      return existing;
+    }
+    console.log(`⏳ ${clientId}: init already in progress — skipping duplicate start`);
+    return null;
   }
+
+  initializingClients.add(clientId);
 
   console.log(`🔧 Init ${clientId} (attempt ${attempt}/${maxRetries + 1})`);
 
@@ -334,6 +388,8 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
 
   let initSettled      = false;
   let initTimeoutHandle = null;
+  let readyHandled     = false;
+  let instanceAborted  = false;
 
   const settleInit = () => {
     if (initSettled) return;
@@ -342,10 +398,11 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   };
 
   const scheduleRetry = async ({ timedOut = false, err = null } = {}) => {
-    if (initSettled) return;
+    if (initSettled || instanceAborted) return;
     settleInit();
     clearQrMeta(clientId);
     activeClients.delete(clientId);
+    finishInitializing(clientId);
     try { await wClient.destroy(); } catch (_) {}
 
     const canRetry = attempt <= maxRetries && (timedOut || isRetryableError(err));
@@ -365,12 +422,15 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
         clientId, attempt: nextAttempt, maxAttempts: maxRetries + 1,
         retryInMs: delay, reason,
       });
-      setTimeout(() => {
+      cancelScheduledRetry(clientId);
+      const timer = setTimeout(() => {
+        scheduledRetryTimers.delete(clientId);
         clearChromiumLocks(clientId);
         createWhatsAppClient(clientId, { attempt: nextAttempt }).catch(e =>
           console.error(`Retry failed for ${clientId}:`, e)
         );
       }, delay);
+      scheduledRetryTimers.set(clientId, timer);
       return;
     }
 
@@ -432,8 +492,11 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   });
 
   wClient.on('ready', async () => {
+    if (readyHandled) return;
+    readyHandled = true;
     settleInit();
     clearQrMeta(clientId);
+    finishInitializing(clientId);
     const phone = wClient.info?.wid?.user || '';
     console.log(`✅ Ready: ${clientId} (${phone})`);
     await disconnectDuplicatePhoneClients(clientId, phone);
@@ -445,12 +508,18 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   });
 
   wClient.on('auth_failure', async (msg) => {
+    instanceAborted = true;
     settleInit();
     clearQrMeta(clientId);
+    finishInitializing(clientId);
     console.error(`🔐 Auth failure for ${clientId}:`, msg);
     activeClients.delete(clientId);
     try { await wClient.destroy(); } catch (_) {}
-    await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'auth_failure', qrCode: null });
+    clearClientSessionData(clientId);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'auth_failure', qrCode: null, phone: '' }
+    );
     emitToClient(clientId, 'auth_failure', { clientId, message: msg });
     notifyWhatsAppDisconnected({
       clientId,
@@ -460,8 +529,10 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   });
 
   wClient.on('disconnected', async (reason) => {
+    instanceAborted = true;
     settleInit();
     clearQrMeta(clientId);
+    finishInitializing(clientId);
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
 
@@ -474,7 +545,16 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
     const skipEmail = clientsSkippingDisconnectEmail.has(clientId);
     clientsSkippingDisconnectEmail.delete(clientId);
 
-    await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'disconnected', qrCode: null });
+    const logout = isLogoutDisconnect(reason);
+    if (logout) {
+      console.warn(`🗑️  ${clientId}: clearing expired session after ${reason}`);
+      clearClientSessionData(clientId);
+    }
+
+    const statusUpdate = { status: 'disconnected', qrCode: null };
+    if (logout) statusUpdate.phone = '';
+
+    await WhatsAppClientModel.findOneAndUpdate({ clientId }, statusUpdate);
     emitToClient(clientId, 'disconnected', { clientId, reason });
 
     if (!skipEmail) {
@@ -516,6 +596,7 @@ const createWhatsAppClient = async (clientId, opts = {}) => {
   }
   activeClients.set(clientId, wClient);
   wClient.initialize().catch(async (err) => {
+    if (instanceAborted) return;
     console.error(`Failed to init ${clientId}:`, err.message);
     await scheduleRetry({ err });
   });
@@ -538,6 +619,8 @@ const destroyClient = async (clientId, options = {}) => {
   }
 
   clearQrMeta(clientId);
+  finishInitializing(clientId);
+  cancelScheduledRetry(clientId);
   const wClient = activeClients.get(clientId);
   if (wClient) {
     try { await wClient.destroy(); } catch (e) {
