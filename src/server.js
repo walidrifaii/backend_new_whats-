@@ -204,7 +204,7 @@ const gracefulShutdown = async (signal) => {
     process.exit(1);
   }, 30000).unref();
 };
-
+// ─── Graceful shutdown ────────────────────────────────────────────────────────`
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
