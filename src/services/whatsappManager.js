@@ -556,6 +556,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
       { status: 'connected', qrCode: null, phone, lastConnected: new Date() }
     );
     emitToClient(clientId, 'ready', { clientId, phone });
+    await applyLidMigrationPatch(wClient);
   });
 
   wClient.on('auth_failure', async (msg) => {
@@ -770,6 +771,9 @@ const isLidRelatedError = (err) => {
 
 const isRetryableSendError = (err) => {
   const msg = String(err?.message || err || '').toLowerCase();
+  if (msg.includes('manually send') || msg.includes('lid/chat table not ready')) {
+    return false;
+  }
   return (
     msg.includes('getchat') ||
     msg.includes('not ready') ||
@@ -842,7 +846,85 @@ const resolveChatId = async (wClient, phone, { requireRegistered = false } = {})
   return cus;
 };
 
+const saveContactBeforeSend = async (wClient, digits) => {
+  if (String(process.env.WA_SAVE_CONTACT_BEFORE_SEND || 'false').toLowerCase() !== 'true') {
+    return;
+  }
+  if (typeof wClient.saveOrEditAddressbookContact !== 'function') return;
+
+  try {
+    const label = String(process.env.WA_OTP_CONTACT_NAME || 'OTP User').trim() || 'OTP User';
+    await wClient.saveOrEditAddressbookContact(digits, label, '', true);
+    console.log(`📇 Saved +${digits} to WhatsApp address book before send`);
+    await sleep(parseInt(process.env.WA_SAVE_CONTACT_DELAY_MS || '2000', 10));
+  } catch (e) {
+    console.warn(`saveOrEditAddressbookContact(${digits}) failed:`, e.message);
+  }
+};
+
 const getPuppeteerPage = (wClient) => wClient?.pupPage || wClient?.page || null;
+
+/** Reduces LID-only routing that breaks first message to new numbers (whatsapp-web.js community patch). */
+const applyLidMigrationPatch = async (wClient) => {
+  if (String(process.env.WA_LID_MIGRATION_PATCH || 'true').toLowerCase() === 'false') {
+    return;
+  }
+  const page = getPuppeteerPage(wClient);
+  if (!page) return;
+
+  try {
+    const applied = await page.evaluate(() => {
+      if (typeof window.injectToFunction !== 'function') return false;
+      const patches = [
+        { module: 'WAWebLid1X1MigrationGating', function: 'Lid1X1MigrationUtils.isLidMigrated' },
+        { module: 'WAWebLid1X1MigrationGating', function: 'shouldHaveAccountLid' }
+      ];
+      for (const p of patches) {
+        try {
+          window.injectToFunction(p, () => false);
+        } catch (_) {
+          /* module may not exist on this WA build */
+        }
+      }
+      return true;
+    });
+    if (applied) console.log('🔧 LID migration patch applied');
+  } catch (e) {
+    console.warn('LID migration patch failed:', e.message);
+  }
+};
+
+/** Open chat in WhatsApp Web UI — helps create LID row for brand-new contacts. */
+const openChatInWhatsAppUi = async (wClient, chatId) => {
+  const page = getPuppeteerPage(wClient);
+  if (!page || !chatId) return false;
+
+  try {
+    const opened = await page.evaluate(async (cid) => {
+      const wid = window.require('WAWebWidFactory').createWid(cid);
+      const Cmd = window.require('WAWebCmd');
+      if (typeof Cmd?.openChatBottom === 'function') {
+        await Cmd.openChatBottom({ chat: wid, chatEntryPoint: 'Chatlist' });
+        return 'openChatBottom';
+      }
+      const OpenChat = window.require('WAWebOpenChatFlow') || window.require('WAWebOpenChat');
+      if (OpenChat && typeof OpenChat.openChat === 'function') {
+        await OpenChat.openChat(wid);
+        return 'openChat';
+      }
+      return null;
+    }, chatId);
+
+    if (opened) {
+      console.log(`💬 Opened chat in WA UI (${opened}): ${chatId}`);
+      await sleep(parseInt(process.env.WA_OPEN_CHAT_DELAY_MS || '2500', 10));
+      return true;
+    }
+  } catch (e) {
+    console.warn(`openChatInWhatsAppUi(${chatId}) failed:`, e.message);
+  }
+  return false;
+};
 
 const serializedJid = (wid, fallbackServer = 'c.us') => {
   if (!wid) return null;
@@ -901,91 +983,147 @@ const prepLidAndPn = async (wClient, cus) => {
   }
 };
 
-/** Last-resort send through in-page WWebJS after findOrCreateLatestChat. */
-const sendTextViaWWebJSChat = async (wClient, chatId, message) => {
+/** All-in-one in-page send: works for new + existing chats, saved or unsaved contacts. */
+const sendTextInPageUnified = async (wClient, digits, message) => {
   const page = getPuppeteerPage(wClient);
   if (!page) throw new Error('WhatsApp browser page is not available');
 
-  const msgData = await page.evaluate(async (cid, text) => {
-    const chat = await window.WWebJS.getChat(cid, { getAsModel: false });
-    if (!chat) throw new Error(`Chat not found for ${cid}`);
-    const msg = await window.WWebJS.sendMessage(chat, text, {});
-    return {
-      id: msg?.id?._serialized || null,
-      ack: typeof msg?.ack === 'number' ? msg.ack : 0
+  const out = await page.evaluate(async (phoneDigits, text) => {
+    const widToStr = (w) => {
+      if (!w) return null;
+      if (typeof w === 'string') return w;
+      if (w._serialized) return w._serialized;
+      if (w.user) return `${w.user}@${w.server || 'c.us'}`;
+      return null;
     };
-  }, chatId, message);
 
+    const jid = `${phoneDigits}@c.us`;
+    const wid = window.require('WAWebWidFactory').createWid(jid);
+
+    const trySendOnChat = async (chat) => {
+      if (!chat) return null;
+      const msg = await window.WWebJS.sendMessage(chat, text, { waitUntilMsgSent: true });
+      const id = msg?.id?._serialized || widToStr(msg?.id);
+      if (!id) return null;
+      return { id, ack: typeof msg?.ack === 'number' ? msg.ack : 0 };
+    };
+
+    const trySendOnId = async (chatId) => {
+      try {
+        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+        return await trySendOnChat(chat);
+      } catch (e) {
+        return { error: String(e.message || e) };
+      }
+    };
+
+    try {
+      const exists = await window.require('WAWebQueryExistsJob').queryWidExists(wid);
+      if (exists && !exists.wid) {
+        return { ok: false, error: `Phone ${phoneDigits} is not registered on WhatsApp` };
+      }
+    } catch (_) {
+      /* query optional */
+    }
+
+    let phoneJid = jid;
+    let lidJid = null;
+    if (window.WWebJS?.enforceLidAndPnRetrieval) {
+      try {
+        const { lid, phone } = await window.WWebJS.enforceLidAndPnRetrieval(jid);
+        phoneJid = widToStr(phone) || jid;
+        lidJid = widToStr(lid);
+      } catch (_) {
+        /* continue */
+      }
+    }
+
+    try {
+      const Cmd = window.require('WAWebCmd');
+      const openWid = window.require('WAWebWidFactory').createWid(phoneJid);
+      if (typeof Cmd?.openChatBottom === 'function') {
+        await Cmd.openChatBottom({ chat: openWid, chatEntryPoint: 'Chatlist' });
+      }
+    } catch (_) {
+      /* UI open optional */
+    }
+
+    try {
+      const FindChat = window.require('WAWebFindChatAction');
+      const pnWid = window.require('WAWebWidFactory').createWid(phoneJid);
+      if (typeof FindChat?.findOrCreateLatestChat === 'function') {
+        const created = await FindChat.findOrCreateLatestChat(pnWid);
+        const sent = await trySendOnChat(created?.chat);
+        if (sent?.id) {
+          return { ok: true, chatId: phoneJid, method: 'findOrCreate', ...sent };
+        }
+      }
+    } catch (_) {
+      /* continue */
+    }
+
+    for (const cid of [...new Set([phoneJid, jid, lidJid].filter(Boolean))]) {
+      const sent = await trySendOnId(cid);
+      if (sent?.id) return { ok: true, chatId: cid, method: 'getChat', ...sent };
+    }
+
+    return { ok: false, error: 'Could not send — WhatsApp chat/LID not ready for this number' };
+  }, digits, message);
+
+  if (!out?.ok) {
+    throw new Error(out?.error || 'In-page WhatsApp send failed');
+  }
+
+  console.log(`📤 In-page send ok (${out.method}) → ${out.chatId}`);
   return {
-    id: { _serialized: msgData.id },
-    ack: msgData.ack
+    result: { id: { _serialized: out.id }, ack: out.ack ?? 0 },
+    chatId: out.chatId
   };
 };
 
-/** Send text; prep LID/chat table, then try phone JID, @c.us, @lid, and WWebJS fallback. */
+/**
+ * Universal text send — existing or new chat, contact saved or not.
+ * 1) Fast client.sendMessage  2) In-page unified  3) Optional contact save retry
+ */
 const sendTextMessage = async (wClient, phone, message) => {
   const digits = phoneDigitsOnly(phone);
   const cus = toCUsJid(digits);
-  const { phoneJid, lidJid } = await prepLidAndPn(wClient, cus);
+  const sendOpts = { waitUntilMsgSent: true };
 
-  const targets = [...new Set([phoneJid, cus, lidJid].filter(Boolean))];
-  let lastError = null;
+  await applyLidMigrationPatch(wClient);
 
-  for (const target of targets) {
+  try {
+    const result = await wClient.sendMessage(cus, message, sendOpts);
+    if (result) {
+      console.log(`📤 Direct send ok → ${cus}`);
+      return { result, chatId: cus };
+    }
+  } catch (err) {
+    if (!isLidRelatedError(err)) throw err;
+    console.warn(`Direct send LID error (${cus}): ${err.message}`);
+  }
+
+  try {
+    return await sendTextInPageUnified(wClient, digits, message);
+  } catch (err) {
+    if (!isLidRelatedError(err)) throw err;
+    console.warn(`In-page unified LID error: ${err.message}`);
+  }
+
+  if (String(process.env.WA_SAVE_CONTACT_BEFORE_SEND || 'false').toLowerCase() === 'true') {
+    await saveContactBeforeSend(wClient, digits);
+    await sleep(parseInt(process.env.WA_SAVE_CONTACT_DELAY_MS || '1500', 10));
     try {
-      const result = await wClient.sendMessage(target, message);
-      return { result, chatId: target };
+      return await sendTextInPageUnified(wClient, digits, message);
     } catch (err) {
-      lastError = err;
-      if (!isLidRelatedError(err)) throw err;
-      console.warn(`sendMessage(${target}) LID error: ${err.message}`);
+      console.warn(`In-page send after contact save failed: ${err.message}`);
     }
   }
 
-  if (typeof wClient.getContactLidAndPhone === 'function') {
-    try {
-      const mapping = await wClient.getContactLidAndPhone([cus]);
-      const row = mapping?.[0];
-      const extra = [
-        serializedJid(row?.pn),
-        serializedJid(row?.lid, 'lid'),
-        typeof row?.pn === 'string' ? row.pn : null,
-        typeof row?.lid === 'string' ? row.lid : null
-      ].filter(Boolean);
-      for (const target of [...new Set(extra)]) {
-        if (targets.includes(target)) continue;
-        try {
-          console.log(`📱 getContactLidAndPhone retry via ${target}`);
-          const result = await wClient.sendMessage(target, message);
-          return { result, chatId: target };
-        } catch (e) {
-          lastError = e;
-          console.warn(`sendMessage(${target}) failed:`, e.message);
-        }
-      }
-    } catch (e) {
-      console.warn('getContactLidAndPhone failed:', e.message);
-    }
-  }
-
-  for (const target of targets) {
-    try {
-      console.log(`📱 WWebJS.sendMessage fallback via ${target}`);
-      const result = await sendTextViaWWebJSChat(wClient, target, message);
-      if (!result?.id?._serialized) {
-        throw new Error('WWebJS send returned no message id');
-      }
-      return { result, chatId: target };
-    } catch (e) {
-      lastError = e;
-      console.warn(`WWebJS.sendMessage(${target}) failed:`, e.message);
-    }
-  }
-
-  const hint =
-    `Cannot send to ${digits}: WhatsApp LID/chat table not ready. ` +
-    `On sender phone ${wClient.info?.wid?.user || 'n/a'}, open WhatsApp and manually send "hi" to +${digits}, then retry.`;
-  throw new Error(lastError?.message ? `${lastError.message}. ${hint}` : hint);
+  throw new Error(
+    `Cannot send to ${digits}. WhatsApp blocked first message to this number. ` +
+      `Verify +${digits} is on WhatsApp, or send one manual message from sender ${wClient.info?.wid?.user || 'n/a'}.`
+  );
 };
 
 /** Wait for message_ack event; poll chat history for updated ack levels. */
@@ -1186,6 +1324,7 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
       let result;
       if (mediaUrl) {
         try {
+          await applyLidMigrationPatch(wClient);
           await prepLidAndPn(wClient, toCUsJid(phoneDigitsOnly(phone)));
           const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
           if (!media?.data) {
