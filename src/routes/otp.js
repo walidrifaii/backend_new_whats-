@@ -6,7 +6,8 @@ const MessageLog = require('../models/MessageLog');
 const {
   sendMessage,
   isClientConnected,
-  waitForClientReady
+  waitForClientReady,
+  getClient
 } = require('../services/whatsappManager');
 const { normalizePhone } = require('../utils/helpers');
 const otpAuthMiddleware = require('../middleware/otpAuth');
@@ -45,27 +46,40 @@ const resolveOtpClient = async (clientIdParam, userId = null) => {
     return String(client.userId) === String(userId);
   };
 
+  const isLiveForOtp = (client) => {
+    if (!client) return false;
+    if (client.status === 'connected') return true;
+    if (!isClientConnected(client.clientId)) return false;
+    const wClient = getClient(client.clientId);
+    return Boolean(wClient?.info?.wid?.user);
+  };
+
+  const pickClient = (client) => {
+    if (!client || !belongsToUser(client)) return null;
+    return isLiveForOtp(client) ? client : null;
+  };
+
   if (explicit) {
     const bySession = await WhatsAppClientModel.findOne({
       clientId: explicit,
-      isActive: true,
-      status: 'connected'
+      isActive: true
     });
-    if (bySession && belongsToUser(bySession)) return bySession;
+    const fromSession = pickClient(bySession);
+    if (fromSession) return fromSession;
 
     const byDbId = await WhatsAppClientModel.findOne({
       _id: explicit,
-      isActive: true,
-      status: 'connected'
+      isActive: true
     });
-    if (byDbId && belongsToUser(byDbId)) return byDbId;
+    const fromDb = pickClient(byDbId);
+    if (fromDb) return fromDb;
     return null;
   }
 
-  const filter = { isActive: true, status: 'connected' };
+  const filter = { isActive: true };
   if (userId) filter.userId = userId;
-  const connected = await WhatsAppClientModel.find(filter);
-  return connected[0] || null;
+  const candidates = await WhatsAppClientModel.find(filter);
+  return candidates.find((c) => isLiveForOtp(c)) || null;
 };
 
 const ensureClientReadyForSend = async (sessionClientId) => {

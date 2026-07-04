@@ -835,7 +835,10 @@ const waitForClientReady = async (clientId, maxWaitMs = null) => {
 
 const sendMessage = async (clientId, phone, message, opts = null) => {
   const dbClient = await WhatsAppClientModel.findOne({ clientId });
-  if (!dbClient || dbClient.status !== 'connected') {
+  if (!dbClient) {
+    throw new Error(`Client ${clientId} is not connected`);
+  }
+  if (dbClient.status !== 'connected' && !isClientConnected(clientId)) {
     throw new Error(`Client ${clientId} is not connected`);
   }
 
