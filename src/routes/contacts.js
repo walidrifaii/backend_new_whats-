@@ -7,6 +7,7 @@ const Papa = require('papaparse');
 const Contact = require('../models/Contact');
 const Campaign = require('../models/Campaign');
 const authMiddleware = require('../middleware/auth');
+const { normalizePhone } = require('../utils/helpers');
 
 // Configure multer for CSV uploads
 const uploadsDir = path.resolve(__dirname, '../../uploads');
@@ -137,10 +138,12 @@ router.post('/:campaignId/add', authMiddleware, async (req, res) => {
     const { phone, name, ...variables } = req.body;
     if (!phone) return res.status(400).json({ error: 'Phone is required' });
 
+    const normalizedPhone = normalizePhone(phone).replace('@c.us', '');
+
     const contact = await Contact.create({
       userId: req.user._id,
       campaignId: campaign._id,
-      phone: phone.trim(),
+      phone: normalizedPhone,
       name: name?.trim() || '',
       variables: Object.fromEntries(Object.entries(variables))
     });

@@ -97,6 +97,22 @@ const removeRecoveryFile = () => {
   }
 };
 
+/** Laravel OTP flow creates campaigns named otp_<uuid> with a single contact. */
+const isOtpCampaign = (campaign) => String(campaign?.name || '').startsWith('otp_');
+
+const shouldSkipBalanceForCampaign = (campaign) =>
+  isOtpCampaign(campaign) ||
+  String(process.env.OTP_CAMPAIGN_SKIP_BALANCE || 'true').toLowerCase() === 'true';
+
+const getCampaignSendDelay = (campaign) => {
+  const minD = Number(campaign.minDelay);
+  const maxD = Number(campaign.maxDelay);
+  const minDelay = Number.isFinite(minD) ? minD : parseInt(process.env.MIN_DELAY_MS, 10) || 20000;
+  const maxDelay = Number.isFinite(maxD) ? maxD : parseInt(process.env.MAX_DELAY_MS, 10) || 30000;
+  if (minDelay <= 0 && maxDelay <= 0) return 0;
+  return randomDelay(Math.max(0, minDelay), Math.max(minDelay, maxDelay));
+};
+
 /**
  * Process a single campaign: iterate through pending contacts,
  * send messages with delay, update progress
@@ -122,11 +138,15 @@ const processCampaign = async (campaignId) => {
     console.log(`✅ Campaign ${campaignId}: WhatsApp client ready`);
   } catch (err) {
     console.error(`⛔ Campaign ${campaignId}: client not ready — ${err.message}`);
-    await Campaign.findByIdAndUpdate(campaignId, { status: 'paused' });
-    emitToClient(clientId, 'campaign-paused', {
-      campaignId,
-      reason: err.message
-    });
+    if (isOtpCampaign(campaign)) {
+      await failPendingContacts(campaignId, err.message);
+    } else {
+      await Campaign.findByIdAndUpdate(campaignId, { status: 'paused' });
+      emitToClient(clientId, 'campaign-paused', {
+        campaignId,
+        reason: err.message
+      });
+    }
     campaignQueues.delete(campaignId.toString());
     return;
   }
@@ -161,34 +181,36 @@ const processCampaign = async (campaignId) => {
         return;
       }
 
-      // Check message balance before sending
-      const userBalance = await User.getBalance(dbClient.userId);
-      if (userBalance <= 0) {
-        console.log(`⛔ Campaign ${campaignId} stopped — user has no message balance.`);
-        const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
-        const { pendingCount, updatedCampaign } = await failPendingContacts(campaignId, reason);
-        emitToClient(clientId, 'campaign-balance-exhausted', {
-          campaignId,
-          message: 'You need to charge balance in message.'
-        });
-        if (updatedCampaign) {
-          emitToClient(clientId, 'campaign-progress', {
+      // Check message balance before sending (skipped for Laravel otp_* campaigns)
+      if (!shouldSkipBalanceForCampaign(campaign)) {
+        const userBalance = await User.getBalance(dbClient.userId);
+        if (userBalance <= 0) {
+          console.log(`⛔ Campaign ${campaignId} stopped — user has no message balance.`);
+          const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
+          const { pendingCount, updatedCampaign } = await failPendingContacts(campaignId, reason);
+          emitToClient(clientId, 'campaign-balance-exhausted', {
             campaignId,
-            sentCount: updatedCampaign.sentCount,
-            failedCount: updatedCampaign.failedCount,
-            totalContacts: updatedCampaign.totalContacts,
-            pendingCount: updatedCampaign.pendingCount
+            message: 'You need to charge balance in message.'
           });
+          if (updatedCampaign) {
+            emitToClient(clientId, 'campaign-progress', {
+              campaignId,
+              sentCount: updatedCampaign.sentCount,
+              failedCount: updatedCampaign.failedCount,
+              totalContacts: updatedCampaign.totalContacts,
+              pendingCount: updatedCampaign.pendingCount
+            });
+          }
+          console.log(`Campaign ${campaignId}: marked ${pendingCount} pending contacts as failed.`);
+          sendBalanceExhaustedEmail({
+            userId: dbClient.userId,
+            email: campaignOwner?.email,
+            name: campaignOwner?.name
+          })
+            .then((result) => logBalanceEmailResult('campaign_blocked_zero', result, campaignOwner?.email))
+            .catch((err) => logBalanceEmailResult('campaign_blocked_zero', { ok: false, reason: err.message }, campaignOwner?.email));
+          return;
         }
-        console.log(`Campaign ${campaignId}: marked ${pendingCount} pending contacts as failed.`);
-        sendBalanceExhaustedEmail({
-          userId: dbClient.userId,
-          email: campaignOwner?.email,
-          name: campaignOwner?.name
-        })
-          .then((result) => logBalanceEmailResult('campaign_blocked_zero', result, campaignOwner?.email))
-          .catch((err) => logBalanceEmailResult('campaign_blocked_zero', { ok: false, reason: err.message }, campaignOwner?.email));
-        return;
       }
 
       const phone = normalizePhone(contact.phone);
@@ -218,7 +240,7 @@ const processCampaign = async (campaignId) => {
       }
 
       // Decrement user balance on successful send
-      if (success) {
+      if (success && !shouldSkipBalanceForCampaign(campaign)) {
         await User.decrementBalance(dbClient.userId, 1);
         const updatedBalance = await User.getBalance(dbClient.userId);
         if (updatedBalance <= 0) {
@@ -268,13 +290,12 @@ const processCampaign = async (campaignId) => {
         pendingCount: updated.totalContacts - updated.sentCount - updated.failedCount
       });
 
-      // Delay between messages (anti-ban)
-      const delay = randomDelay(
-        campaign.minDelay || parseInt(process.env.MIN_DELAY_MS) || 20000,
-        campaign.maxDelay || parseInt(process.env.MAX_DELAY_MS) || 30000
-      );
-      console.log(`⏳ Waiting ${delay}ms before next message...`);
-      await sleep(delay);
+      // Delay between messages (anti-ban); otp_* campaigns use minDelay/maxDelay 0
+      const delay = getCampaignSendDelay(campaign);
+      if (delay > 0) {
+        console.log(`⏳ Waiting ${delay}ms before next message...`);
+        await sleep(delay);
+      }
     }
   }
 
@@ -293,9 +314,9 @@ const processCampaign = async (campaignId) => {
 };
 
 /**
- * Start a campaign
+ * Start a campaign. Options.wait=true blocks until finished (used for Laravel otp_* OTP).
  */
-const startCampaign = async (campaignId) => {
+const startCampaign = async (campaignId, options = {}) => {
   const campaign = await Campaign.findById(campaignId);
   if (!campaign) throw new Error('Campaign not found');
 
@@ -308,14 +329,38 @@ const startCampaign = async (campaignId) => {
     startedAt: campaign.startedAt || new Date()
   });
 
-  // Run campaign in background (non-blocking)
-  const promise = processCampaign(campaignId).catch(err => {
+  const promise = processCampaign(campaignId).catch(async (err) => {
     console.error(`Campaign ${campaignId} error:`, err);
-    Campaign.findByIdAndUpdate(campaignId, { status: 'failed' }).catch(() => {});
+    await Campaign.findByIdAndUpdate(campaignId, { status: 'failed' }).catch(() => {});
     campaignQueues.delete(campaignId.toString());
+    throw err;
   });
 
   campaignQueues.set(campaignId.toString(), promise);
+
+  if (options.wait) {
+    try {
+      await promise;
+    } finally {
+      campaignQueues.delete(campaignId.toString());
+    }
+
+    const final = await Campaign.findById(campaignId);
+    const failedContacts = await Contact.find(
+      { campaignId, status: 'failed' },
+      { limit: 1, sort: { createdAt: 1 } }
+    );
+    const sent = Number(final?.sentCount || 0) > 0;
+    const failed = Number(final?.failedCount || 0) > 0;
+
+    return {
+      ok: sent && !failed,
+      campaign: final,
+      error: failedContacts[0]?.error || null
+    };
+  }
+
+  promise.catch(() => {});
   return true;
 };
 
@@ -420,6 +465,7 @@ module.exports = {
   pauseCampaign,
   resumeCampaign,
   isCampaignRunning,
+  isOtpCampaign,
   prepareCampaignsForShutdown,
   resumeCampaignsAfterBoot
 };

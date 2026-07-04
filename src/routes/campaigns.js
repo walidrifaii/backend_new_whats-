@@ -6,13 +6,33 @@ const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { query } = require('../db/mysql');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
-const { startCampaign, pauseCampaign, resumeCampaign } = require('../services/campaignQueue');
-const { isClientConnected } = require('../services/whatsappManager');
+const { startCampaign, pauseCampaign, resumeCampaign, isOtpCampaign } = require('../services/campaignQueue');
+const { isClientConnected, waitForClientReady } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const {
   resolveMediaUrlForDb,
   resolveMediaTypeForDb
 } = require('../utils/campaignMedia');
+
+const formatCampaign = (campaign, client = null) => {
+  if (!campaign) return campaign;
+  const payload = client
+    ? { ...campaign, clientId: client }
+    : { ...campaign };
+  return { ...payload, id: campaign._id };
+};
+
+const resolveWhatsAppClient = async (clientIdParam, userId) => {
+  const id = String(clientIdParam || '').trim();
+  if (!id) return null;
+
+  const base = { userId, isActive: true };
+  const byDbId = await WhatsAppClientModel.findOne({ ...base, _id: id });
+  if (byDbId) return byDbId;
+
+  const bySessionId = await WhatsAppClientModel.findOne({ ...base, clientId: id });
+  return bySessionId || null;
+};
 
 // GET /api/campaigns
 router.get('/', authMiddleware, async (req, res) => {
@@ -46,27 +66,24 @@ router.post('/', authMiddleware, [
     const { name, message, clientId, minDelay, maxDelay } = req.body;
     const mediaResolved = resolveMediaUrlForDb(req.body);
     const typeResolved = resolveMediaTypeForDb(req.body);
+    const otpCampaign = String(name || '').startsWith('otp_');
 
-    const client = await WhatsAppClientModel.findOne({
-      _id: clientId,
-      userId: req.user._id,
-      isActive: true
-    });
+    const client = await resolveWhatsAppClient(clientId, req.user._id);
     if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
 
     const campaign = await Campaign.create({
       userId: req.user._id,
-      clientId,
+      clientId: client._id,
       name,
       message,
       mediaUrl: mediaResolved.set ? mediaResolved.value : null,
       mediaType: typeResolved.set ? typeResolved.value : null,
-      minDelay: minDelay || 20000,
-      maxDelay: maxDelay || 30000,
+      minDelay: otpCampaign ? 0 : (minDelay || 20000),
+      maxDelay: otpCampaign ? 0 : (maxDelay || 30000),
       status: 'draft'
     });
 
-    res.status(201).json({ campaign });
+    res.status(201).json({ campaign: formatCampaign(campaign, client) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -149,52 +166,79 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
       });
     }
 
+    if (isOtpCampaign(campaign)) {
+      try {
+        await waitForClientReady(client.clientId);
+      } catch (err) {
+        return res.status(503).json({ ok: false, error: err.message });
+      }
+    }
+
     if (campaign.totalContacts === 0) {
       return res.status(400).json({ error: 'No contacts uploaded for this campaign' });
     }
 
-    const balance = await User.getBalance(req.user._id);
-    if (balance <= 0) {
-      const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
-      const pendingRows = await query(
-        `SELECT COUNT(*) AS total FROM contacts WHERE campaign_id = ? AND status = 'pending'`,
-        [campaign._id]
-      );
-      const pendingCount = pendingRows[0]?.total || 0;
-      if (pendingCount > 0) {
-        await query(
-          `UPDATE contacts
-           SET status = 'failed', error = ?
-           WHERE campaign_id = ? AND status = 'pending'`,
-          [reason, campaign._id]
+    if (!isOtpCampaign(campaign)) {
+      const balance = await User.getBalance(req.user._id);
+      if (balance <= 0) {
+        const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
+        const pendingRows = await query(
+          `SELECT COUNT(*) AS total FROM contacts WHERE campaign_id = ? AND status = 'pending'`,
+          [campaign._id]
         );
-        await Campaign.findByIdAndUpdate(
-          campaign._id,
-          { status: 'failed', completedAt: new Date(), $inc: { failedCount: pendingCount } },
-          { new: true }
-        );
-      }
+        const pendingCount = pendingRows[0]?.total || 0;
+        if (pendingCount > 0) {
+          await query(
+            `UPDATE contacts
+             SET status = 'failed', error = ?
+             WHERE campaign_id = ? AND status = 'pending'`,
+            [reason, campaign._id]
+          );
+          await Campaign.findByIdAndUpdate(
+            campaign._id,
+            { status: 'failed', completedAt: new Date(), $inc: { failedCount: pendingCount } },
+            { new: true }
+          );
+        }
 
-      sendBalanceExhaustedEmail({
-        userId: req.user._id,
-        email: req.user.email,
-        name: req.user.name
-      })
-        .then((result) => {
-          console.log(
-            `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${req.user.email || 'n/a'}`
-          );
+        sendBalanceExhaustedEmail({
+          userId: req.user._id,
+          email: req.user.email,
+          name: req.user.name
         })
-        .catch((err) => {
-          console.log(
-            `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${req.user.email || 'n/a'}`
-          );
+          .then((result) => {
+            console.log(
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${req.user.email || 'n/a'}`
+            );
+          })
+          .catch((err) => {
+            console.log(
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${req.user.email || 'n/a'}`
+            );
+          });
+        return res.status(403).json({
+          error: 'You need to charge balance in message.',
+          balanceExhausted: true,
+          currentBalance: 0,
+          contactsMarkedFailed: pendingCount
         });
-      return res.status(403).json({
-        error: 'You need to charge balance in message.',
-        balanceExhausted: true,
-        currentBalance: 0,
-        contactsMarkedFailed: pendingCount
+      }
+    }
+
+    if (isOtpCampaign(campaign)) {
+      const result = await startCampaign(campaign._id, { wait: true });
+      if (!result.ok) {
+        return res.status(503).json({
+          ok: false,
+          error: result.error || 'OTP delivery failed',
+          campaign: formatCampaign(result.campaign, client)
+        });
+      }
+      return res.json({
+        ok: true,
+        message: 'Campaign started',
+        campaignId: campaign._id,
+        campaign: formatCampaign(result.campaign, client)
       });
     }
 
