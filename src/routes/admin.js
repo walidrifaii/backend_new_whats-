@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
+const { normalizeMessageSource } = require('../utils/messageSource');
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -66,8 +67,20 @@ router.get('/users', async (req, res) => {
 
     const result = users.map(u => {
       const safe = u.toJSON();
-      safe.stats = statsMap[u._id] || { totalMessages: 0, sentCount: 0, failedCount: 0, bySource: [] };
-      safe.clientCount = clientMap[u._id] || 0;
+      if (u.parentUserId && u.source) {
+        const parentStats = statsMap[u.parentUserId];
+        const src = (parentStats?.bySource || []).find((row) => row.source === u.source);
+        safe.stats = {
+          totalMessages: src?.totalMessages || 0,
+          sentCount: src?.sentCount || 0,
+          failedCount: src?.failedCount || 0,
+          bySource: src ? [src] : []
+        };
+        safe.clientCount = clientMap[u.parentUserId] || 0;
+      } else {
+        safe.stats = statsMap[u._id] || { totalMessages: 0, sentCount: 0, failedCount: 0, bySource: [] };
+        safe.clientCount = clientMap[u._id] || 0;
+      }
       return safe;
     });
 
@@ -138,6 +151,56 @@ router.patch('/users/:id/toggle-active', async (req, res) => {
     await query(`UPDATE users SET is_active = ? WHERE id = ?`, [newStatus, req.params.id]);
     const updated = await User.findById(req.params.id);
     res.json({ user: updated.toJSON() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/service-accounts — create ehkini/solv login on this WhatsApp owner
+router.post('/users/:id/service-accounts', [
+  body('name').trim().notEmpty().withMessage('Name is required'),
+  body('email').isEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('source').trim().notEmpty().withMessage('Source is required (example: ehkini or solv)'),
+  body('messageBalance').optional().isInt({ min: 0 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const parent = await User.findById(req.params.id);
+    if (!parent) return res.status(404).json({ error: 'Owner account not found' });
+    if (parent.parentUserId) {
+      return res.status(400).json({ error: 'Cannot attach a service login to another service login. Use the WhatsApp owner account.' });
+    }
+
+    const source = normalizeMessageSource(req.body.source);
+    if (!source) {
+      return res.status(400).json({ error: 'Source must be letters, numbers, dot, dash, or underscore' });
+    }
+
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const existingEmail = await User.findOne({ email });
+    if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
+
+    const existingSource = await User.findOne({ parentUserId: parent._id, source });
+    if (existingSource) {
+      return res.status(400).json({ error: `This owner already has a login for source "${source}"` });
+    }
+
+    const user = await User.create({
+      name: req.body.name,
+      email,
+      password: req.body.password,
+      parentUserId: parent._id,
+      source,
+      messageBalance: parseInt(req.body.messageBalance, 10) || 0
+    });
+
+    res.status(201).json({
+      user: user.toJSON(),
+      message: `Service login created for source "${source}". They share this owner's WhatsApp.`
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

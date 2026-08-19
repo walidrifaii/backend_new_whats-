@@ -14,6 +14,9 @@ const mapRowToUser = (row) => {
     isActive: !!row.is_active,
     authToken: row.api_token || row.auth_token || null,
     messageBalance: row.message_balance ?? 0,
+    parentUserId: row.parent_user_id || null,
+    source: row.source || null,
+    isServiceAccount: Boolean(row.parent_user_id),
     createdAt: row.created_at,
     async comparePassword(password) {
       return bcrypt.compare(password, this.password);
@@ -30,7 +33,7 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
-  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, created_at';
+  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, created_at';
 
   static async ensureAuthTokenColumn() {
     try {
@@ -54,6 +57,38 @@ class UserModel {
         throw err;
       }
     }
+    await this.ensureServiceAccountColumns();
+  }
+
+  static async ensureServiceAccountColumns() {
+    try {
+      await query(`ALTER TABLE users ADD COLUMN parent_user_id CHAR(24) NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD COLUMN source VARCHAR(64) NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD INDEX idx_users_parent_user_id (parent_user_id)`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD UNIQUE INDEX uq_users_parent_source (parent_user_id, source)`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
+        throw err;
+      }
+    }
   }
 
   static async findOne(filter = {}) {
@@ -71,6 +106,14 @@ class UserModel {
     if (filter.isActive !== undefined) {
       clauses.push('is_active = ?');
       values.push(filter.isActive ? 1 : 0);
+    }
+    if (filter.parentUserId !== undefined) {
+      clauses.push('parent_user_id = ?');
+      values.push(String(filter.parentUserId));
+    }
+    if (filter.source !== undefined) {
+      clauses.push('source = ?');
+      values.push(String(filter.source));
     }
 
     if (clauses.length === 0) {
@@ -107,11 +150,13 @@ class UserModel {
     const role = data.role === 'admin' ? 'admin' : 'user';
     const isActive = data.isActive === undefined ? true : !!data.isActive;
     const messageBalance = parseInt(data.messageBalance) || 0;
+    const parentUserId = data.parentUserId ? String(data.parentUserId) : null;
+    const source = data.source ? String(data.source) : null;
 
     await query(
-      `INSERT INTO users (id, name, email, password, role, is_active, message_balance, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [id, name, email, hashedPassword, role, isActive ? 1 : 0, messageBalance]
+      `INSERT INTO users (id, name, email, password, role, is_active, message_balance, parent_user_id, source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [id, name, email, hashedPassword, role, isActive ? 1 : 0, messageBalance, parentUserId, source]
     );
 
     return this.findById(id);

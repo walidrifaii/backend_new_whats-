@@ -6,6 +6,15 @@ const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildClientQrToken } = require('../utils/qrShare');
+const { getOwnerUserId, isServiceAccount } = require('../utils/accountScope');
+
+const rejectServiceAccountWrite = (req, res) => {
+  if (!isServiceAccount(req.user)) return false;
+  res.status(403).json({
+    error: 'Service logins cannot manage WhatsApp. Sign in with the owner account to connect the number.'
+  });
+  return true;
+};
 
 const withTimeout = (promise, ms, message) => {
   return Promise.race([
@@ -30,7 +39,7 @@ const buildQrSharePayload = (req, clientId) => {
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const clients = await WhatsAppClientModel.find(
-      { userId: req.user._id, isActive: true },
+      { userId: getOwnerUserId(req.user), isActive: true },
       { sort: { createdAt: -1 } }
     );
     res.json({ clients });
@@ -73,6 +82,7 @@ router.post('/', authMiddleware, [
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  if (rejectServiceAccountWrite(req, res)) return;
 
   try {
     const { name } = req.body;
@@ -112,6 +122,7 @@ router.post('/', authMiddleware, [
 
 // POST /api/clients/:id/connect - initialize WhatsApp connection
 router.post('/:id/connect', authMiddleware, async (req, res) => {
+  if (rejectServiceAccountWrite(req, res)) return;
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
@@ -170,6 +181,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
 
 // POST /api/clients/:id/disconnect
 router.post('/:id/disconnect', authMiddleware, async (req, res) => {
+  if (rejectServiceAccountWrite(req, res)) return;
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
@@ -189,7 +201,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
-      userId: req.user._id
+      userId: getOwnerUserId(req.user)
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
@@ -204,7 +216,7 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
-      userId: req.user._id,
+      userId: getOwnerUserId(req.user),
       isActive: true
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
@@ -223,6 +235,7 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
 
 // DELETE /api/clients/:id
 router.delete('/:id', authMiddleware, async (req, res) => {
+  if (rejectServiceAccountWrite(req, res)) return;
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,

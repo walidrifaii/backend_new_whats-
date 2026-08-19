@@ -3,13 +3,15 @@ const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
+const User = require('../models/User');
 const {
   sendMessage,
   isClientConnected,
   waitForClientReady
 } = require('../services/whatsappManager');
 const { normalizePhone } = require('../utils/helpers');
-const { resolveMessageSource, normalizeMessageSource } = require('../utils/messageSource');
+const { resolveMessageSource } = require('../utils/messageSource');
+const { getOwnerUserId, getLockedSource, applySourceScope } = require('../utils/accountScope');
 const otpAuthMiddleware = require('../middleware/otpAuth');
 const authMiddleware = require('../middleware/auth');
 
@@ -111,9 +113,9 @@ router.post(
 
     try {
       const phone = normalizePhone(req.body.phone).replace('@c.us', '');
-      const userId = req.user?._id || null;
-      const source = resolveMessageSource(req);
-      const dbClient = await resolveOtpClient(req.body.clientId, userId);
+      const ownerUserId = getOwnerUserId(req.user);
+      const source = getLockedSource(req.user) || resolveMessageSource(req);
+      const dbClient = await resolveOtpClient(req.body.clientId, ownerUserId);
 
       if (!dbClient) {
         return res.status(503).json({
@@ -121,6 +123,29 @@ router.post(
           error:
             'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
         });
+      }
+
+      let billedUser = null;
+      if (req.user?.parentUserId) {
+        billedUser = req.user;
+      } else if (!req.user && source) {
+        billedUser = await User.findOne({
+          parentUserId: dbClient.userId,
+          source,
+          isActive: true
+        });
+      }
+      if (billedUser) {
+        const balance = await User.getBalance(billedUser._id);
+        if (balance <= 0) {
+          return res.status(403).json({
+            ok: false,
+            error: 'You need to charge balance in message.',
+            balanceExhausted: true,
+            currentBalance: 0,
+            source
+          });
+        }
       }
 
       const sessionClientId = dbClient.clientId;
@@ -145,6 +170,12 @@ router.post(
         source
       });
 
+      let remainingBalance = null;
+      if (billedUser) {
+        await User.decrementBalance(billedUser._id, 1);
+        remainingBalance = await User.getBalance(billedUser._id);
+      }
+
       console.log(`✅ OTP sent to ${phone} via ${sessionClientId}${source ? ` source=${source}` : ''}`);
 
       return res.json({
@@ -154,7 +185,8 @@ router.post(
         expires_in: getOtpExpiresMinutes() * 60,
         messageId,
         clientId: sessionClientId,
-        source
+        source,
+        remainingBalance
       });
     } catch (err) {
       console.error(`❌ OTP send failed:`, err.message);
@@ -174,19 +206,19 @@ router.post(
  */
 router.get('/stats', authMiddleware, async (req, res) => {
   try {
-    const source = normalizeMessageSource(req.query.source);
-    const filter = { userId: req.user._id, direction: 'outgoing' };
-    if (source) filter.source = source;
+    const filter = { userId: getOwnerUserId(req.user), direction: 'outgoing' };
+    applySourceScope(filter, req.user, req.query.source);
 
     const stats = await MessageLog.getStats(filter);
     const bySource = await MessageLog.getStatsBySource({
-      userId: req.user._id,
-      direction: 'outgoing'
+      userId: getOwnerUserId(req.user),
+      direction: 'outgoing',
+      ...(filter.source ? { source: filter.source } : {})
     });
 
     return res.json({
       ok: true,
-      source: source || null,
+      source: filter.source || null,
       stats: stats || { total: 0, sent: 0, failed: 0, received: 0, outgoing: 0, incoming: 0 },
       bySource
     });

@@ -17,6 +17,8 @@ const {
   DEFAULT_SPREAD_HOURS
 } = require('../utils/bulkSchedule');
 const authMiddleware = require('../middleware/auth');
+const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
+const { resolveMessageSource } = require('../utils/messageSource');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
 
@@ -30,7 +32,8 @@ const resolveWhatsAppClient = async (clientIdParam, userId) => {
   const id = String(clientIdParam || '').trim();
   if (!id) return null;
 
-  const base = { userId, isActive: true };
+  const ownerId = userId;
+  const base = { userId: ownerId, isActive: true };
 
   const byDbId = await WhatsAppClientModel.findOne({ ...base, _id: id });
   if (byDbId) return byDbId;
@@ -157,7 +160,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       });
     }
 
-    const dbClient = await resolveWhatsAppClient(clientId, req.user._id);
+    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
     if (!dbClient) {
       return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
@@ -327,7 +330,7 @@ router.post('/send', authMiddleware, async (req, res) => {
       });
     }
 
-    const dbClient = await resolveWhatsAppClient(clientId, req.user._id);
+    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
     if (!dbClient) {
       return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
@@ -369,13 +372,14 @@ router.post('/send', authMiddleware, async (req, res) => {
       [message, mediaUrl && `(media: ${mediaUrl})`].filter(Boolean).join(' ') || '(media only)';
 
     await MessageLog.create({
-      userId: req.user._id,
+      userId: getOwnerUserId(req.user),
       clientId: dbClient._id,
       phone,
       message: logText,
       direction: 'outgoing',
       status: 'sent',
-      whatsappMessageId: result?.id?._serialized
+      whatsappMessageId: result?.id?._serialized,
+      source: getLockedSource(req.user) || resolveMessageSource(req)
     });
 
     res.json({
