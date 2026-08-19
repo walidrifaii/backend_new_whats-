@@ -7,6 +7,7 @@ const { sendMessage, isClientConnected, waitForClientReady } = require('./whatsa
 const { normalizePhone, sleep } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
+const { getOwnerUserId } = require('../utils/accountScope');
 
 const POLL_MS = Math.max(5000, parseInt(process.env.BULK_SCHEDULER_POLL_MS, 10) || 30000);
 
@@ -62,6 +63,8 @@ const processMessageJob = async (jobId) => {
 
   const sessionClientId = dbClient.clientId;
   const jobOwner = await User.findById(job.userId);
+  const logOwnerId = getOwnerUserId(jobOwner) || job.userId;
+  const logSource = jobOwner?.source || null;
 
   if (!isClientConnected(sessionClientId)) {
     const reason =
@@ -180,14 +183,15 @@ const processMessageJob = async (jobId) => {
     });
 
     await MessageLog.create({
-      userId: job.userId,
+      userId: logOwnerId,
       clientId: dbClient._id,
       phone: item.phone,
       message: logText,
       direction: 'outgoing',
       status: success ? 'sent' : 'failed',
       whatsappMessageId: whatsappId,
-      error: error || undefined
+      error: error || undefined,
+      source: logSource
     });
 
     const updateFields = success

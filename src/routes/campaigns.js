@@ -3,14 +3,15 @@ const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const Campaign = require('../models/Campaign');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const User = require('../models/User');
 const { query } = require('../db/mysql');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
-const { startCampaign, pauseCampaign, resumeCampaign, isOtpCampaign } = require('../services/campaignQueue');
+const { startCampaign, pauseCampaign, resumeCampaign, isOtpCampaign, shouldSkipBalanceForCampaign } = require('../services/campaignQueue');
 const { isClientConnected, waitForClientReady } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { resolveMediaUrlForDb, resolveMediaTypeForDb } = require('../utils/campaignMedia');
 const { normalizeMessageSource } = require('../utils/messageSource');
+const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
+const { resolveBilledUser, requireMessageBalance } = require('../utils/messageBilling');
 
 const formatCampaign = (campaign, client = null) => {
   if (!campaign) return campaign;
@@ -65,13 +66,13 @@ router.post('/', authMiddleware, [
     const mediaResolved = resolveMediaUrlForDb(req.body);
     const typeResolved = resolveMediaTypeForDb(req.body);
     const otpCampaign = String(name || '').startsWith('otp_');
-    const source = normalizeMessageSource(req.body.source || req.body.service || req.headers['x-service-name']);
+    const source = getLockedSource(req.user) || normalizeMessageSource(req.body.source || req.body.service || req.headers['x-service-name']);
 
-    const client = await resolveWhatsAppClient(clientId, req.user._id);
+    const client = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
     if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
 
     const campaign = await Campaign.create({
-      userId: req.user._id,
+      userId: getOwnerUserId(req.user),
       clientId: client._id,
       name,
       message,
@@ -178,9 +179,14 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No contacts uploaded for this campaign' });
     }
 
-    if (!isOtpCampaign(campaign)) {
-      const balance = await User.getBalance(req.user._id);
-      if (balance <= 0) {
+    const billedUser = await resolveBilledUser({
+      user: req.user,
+      ownerUserId: getOwnerUserId(req.user),
+      source: getLockedSource(req.user) || campaign.source
+    });
+    if (!shouldSkipBalanceForCampaign(campaign, billedUser)) {
+      const balanceCheck = await requireMessageBalance(billedUser, 1);
+      if (!balanceCheck.ok) {
         const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
         const pendingRows = await query(
           `SELECT COUNT(*) AS total FROM contacts WHERE campaign_id = ? AND status = 'pending'`,
@@ -202,24 +208,24 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
         }
 
         sendBalanceExhaustedEmail({
-          userId: req.user._id,
-          email: req.user.email,
-          name: req.user.name
+          userId: billedUser?._id || req.user._id,
+          email: billedUser?.email || req.user.email,
+          name: billedUser?.name || req.user.name
         })
           .then((result) => {
             console.log(
-              `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${req.user.email || 'n/a'}`
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${billedUser?.email || req.user.email || 'n/a'}`
             );
           })
           .catch((err) => {
             console.log(
-              `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${req.user.email || 'n/a'}`
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${billedUser?.email || req.user.email || 'n/a'}`
             );
           });
         return res.status(403).json({
           error: 'You need to charge balance in message.',
           balanceExhausted: true,
-          currentBalance: 0,
+          currentBalance: balanceCheck.currentBalance || 0,
           contactsMarkedFailed: pendingCount
         });
       }

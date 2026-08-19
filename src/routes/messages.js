@@ -19,6 +19,7 @@ const {
 const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
 const { resolveMessageSource } = require('../utils/messageSource');
+const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
 
@@ -150,12 +151,18 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: `Maximum ${MAX_BULK_PHONES} phones per bulk job` });
     }
 
-    const balance = await User.getBalance(req.user._id);
-    if (balance < phoneList.length) {
+    const source = getLockedSource(req.user) || resolveMessageSource(req);
+    const billedUser = await resolveBilledUser({
+      user: req.user,
+      ownerUserId: getOwnerUserId(req.user),
+      source
+    });
+    const balanceCheck = await requireMessageBalance(billedUser, phoneList.length);
+    if (!balanceCheck.ok) {
       return res.status(403).json({
-        error: 'Insufficient message balance for this bulk job.',
-        balanceExhausted: balance <= 0,
-        currentBalance: balance,
+        error: balanceCheck.error || 'Insufficient message balance for this bulk job.',
+        balanceExhausted: (balanceCheck.currentBalance || 0) <= 0,
+        currentBalance: balanceCheck.currentBalance || 0,
         required: phoneList.length
       });
     }
@@ -199,7 +206,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     const scheduledItems = buildItemSchedule(phoneList, schedule.delayBetweenMessagesMs, startAt);
 
     const job = await MessageJob.create({
-      userId: req.user._id,
+      userId: billedUser?._id || req.user._id,
       clientId: dbClient._id,
       message: text,
       mediaUrl,
@@ -214,7 +221,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     await MessageJobItem.insertMany(
       scheduledItems.map((row) => ({
         jobId: job._id,
-        userId: req.user._id,
+        userId: billedUser?._id || req.user._id,
         phone: row.phone,
         status: 'pending',
         scheduledAt: row.scheduledAt
@@ -314,19 +321,25 @@ router.post('/send', authMiddleware, async (req, res) => {
       });
     }
 
-    const balance = await User.getBalance(req.user._id);
-    if (balance <= 0) {
+    const source = getLockedSource(req.user) || resolveMessageSource(req);
+    const billedUser = await resolveBilledUser({
+      user: req.user,
+      ownerUserId: getOwnerUserId(req.user),
+      source
+    });
+    const balanceCheck = await requireMessageBalance(billedUser, 1);
+    if (!balanceCheck.ok) {
       sendBalanceExhaustedEmail({
-        userId: req.user._id,
-        email: req.user.email,
-        name: req.user.name
+        userId: billedUser?._id || req.user._id,
+        email: billedUser?.email || req.user.email,
+        name: billedUser?.name || req.user.name
       })
-        .then((result) => logBalanceEmailResult('single_send_blocked', result, req.user.email))
-        .catch((err) => logBalanceEmailResult('single_send_blocked', { ok: false, reason: err.message }, req.user.email));
+        .then((result) => logBalanceEmailResult('single_send_blocked', result, billedUser?.email || req.user.email))
+        .catch((err) => logBalanceEmailResult('single_send_blocked', { ok: false, reason: err.message }, billedUser?.email || req.user.email));
       return res.status(403).json({
-        error: 'You need to charge balance in message.',
+        error: balanceCheck.error,
         balanceExhausted: true,
-        currentBalance: 0
+        currentBalance: balanceCheck.currentBalance || 0
       });
     }
 
@@ -356,16 +369,16 @@ router.post('/send', authMiddleware, async (req, res) => {
       sendOpts
     );
 
-    await User.decrementBalance(req.user._id, 1);
-    const updatedBalance = await User.getBalance(req.user._id);
-    if (updatedBalance <= 0) {
+    await chargeMessageBalance(billedUser, 1);
+    const updatedBalance = billedUser ? await User.getBalance(billedUser._id) : null;
+    if (updatedBalance !== null && updatedBalance <= 0) {
       sendBalanceExhaustedEmail({
-        userId: req.user._id,
-        email: req.user.email,
-        name: req.user.name
+        userId: billedUser._id,
+        email: billedUser.email,
+        name: billedUser.name
       })
-        .then((result) => logBalanceEmailResult('single_send_reached_zero', result, req.user.email))
-        .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, req.user.email));
+        .then((result) => logBalanceEmailResult('single_send_reached_zero', result, billedUser.email))
+        .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, billedUser.email));
     }
 
     const logText =
@@ -379,7 +392,7 @@ router.post('/send', authMiddleware, async (req, res) => {
       direction: 'outgoing',
       status: 'sent',
       whatsappMessageId: result?.id?._serialized,
-      source: getLockedSource(req.user) || resolveMessageSource(req)
+      source
     });
 
     res.json({

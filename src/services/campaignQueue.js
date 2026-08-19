@@ -11,6 +11,7 @@ const { sendMessage, isClientConnected, waitForClientReady } = require('./whatsa
 const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
+const { resolveBilledUser } = require('../utils/messageBilling');
 
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
@@ -100,9 +101,11 @@ const removeRecoveryFile = () => {
 /** Laravel OTP flow creates campaigns named otp_<uuid> with a single contact. */
 const isOtpCampaign = (campaign) => String(campaign?.name || '').startsWith('otp_');
 
-const shouldSkipBalanceForCampaign = (campaign) =>
-  isOtpCampaign(campaign) ||
-  String(process.env.OTP_CAMPAIGN_SKIP_BALANCE || 'true').toLowerCase() === 'true';
+const shouldSkipBalanceForCampaign = (campaign, billedUser = null) => {
+  if (billedUser?.parentUserId) return false;
+  if (!isOtpCampaign(campaign)) return false;
+  return String(process.env.OTP_CAMPAIGN_SKIP_BALANCE || 'true').toLowerCase() !== 'false';
+};
 
 const getCampaignSendDelay = (campaign) => {
   const minD = Number(campaign.minDelay);
@@ -127,6 +130,13 @@ const processCampaign = async (campaignId) => {
   if (!dbClient) return;
   const clientId = dbClient.clientId;
   const campaignOwner = await User.findById(dbClient.userId);
+  const billedUser = await resolveBilledUser({
+    user: campaignOwner,
+    ownerUserId: dbClient.userId,
+    source: campaign.source
+  });
+  const skipBalance = shouldSkipBalanceForCampaign(campaign, billedUser);
+  const notifyUser = billedUser || campaignOwner;
 
   console.log(`🚀 Starting campaign ${campaignId} via client ${clientId}`);
 
@@ -181,11 +191,11 @@ const processCampaign = async (campaignId) => {
         return;
       }
 
-      // Check message balance before sending (skipped for Laravel otp_* campaigns)
-      if (!shouldSkipBalanceForCampaign(campaign)) {
-        const userBalance = await User.getBalance(dbClient.userId);
+      // Check message balance before sending (OTP campaigns skip unless they map to a service account)
+      if (!skipBalance) {
+        const userBalance = await User.getBalance((billedUser || campaignOwner)._id);
         if (userBalance <= 0) {
-          console.log(`⛔ Campaign ${campaignId} stopped — user has no message balance.`);
+          console.log(`⛔ Campaign ${campaignId} stopped — insufficient message balance.`);
           const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
           const { pendingCount, updatedCampaign } = await failPendingContacts(campaignId, reason);
           emitToClient(clientId, 'campaign-balance-exhausted', {
@@ -203,12 +213,12 @@ const processCampaign = async (campaignId) => {
           }
           console.log(`Campaign ${campaignId}: marked ${pendingCount} pending contacts as failed.`);
           sendBalanceExhaustedEmail({
-            userId: dbClient.userId,
-            email: campaignOwner?.email,
-            name: campaignOwner?.name
+            userId: notifyUser?._id,
+            email: notifyUser?.email,
+            name: notifyUser?.name
           })
-            .then((result) => logBalanceEmailResult('campaign_blocked_zero', result, campaignOwner?.email))
-            .catch((err) => logBalanceEmailResult('campaign_blocked_zero', { ok: false, reason: err.message }, campaignOwner?.email));
+            .then((result) => logBalanceEmailResult('campaign_blocked_zero', result, notifyUser?.email))
+            .catch((err) => logBalanceEmailResult('campaign_blocked_zero', { ok: false, reason: err.message }, notifyUser?.email));
           return;
         }
       }
@@ -239,18 +249,17 @@ const processCampaign = async (campaignId) => {
         console.error(`❌ Failed to send to ${phone}:`, err.message);
       }
 
-      // Decrement user balance on successful send
-      if (success && !shouldSkipBalanceForCampaign(campaign)) {
-        await User.decrementBalance(dbClient.userId, 1);
-        const updatedBalance = await User.getBalance(dbClient.userId);
+      if (success && !skipBalance && billedUser) {
+        await User.decrementBalance(billedUser._id, 1);
+        const updatedBalance = await User.getBalance(billedUser._id);
         if (updatedBalance <= 0) {
           sendBalanceExhaustedEmail({
-            userId: dbClient.userId,
-            email: campaignOwner?.email,
-            name: campaignOwner?.name
+            userId: billedUser._id,
+            email: billedUser.email,
+            name: billedUser.name
           })
-            .then((result) => logBalanceEmailResult('campaign_reached_zero', result, campaignOwner?.email))
-            .catch((err) => logBalanceEmailResult('campaign_reached_zero', { ok: false, reason: err.message }, campaignOwner?.email));
+            .then((result) => logBalanceEmailResult('campaign_reached_zero', result, billedUser.email))
+            .catch((err) => logBalanceEmailResult('campaign_reached_zero', { ok: false, reason: err.message }, billedUser.email));
         }
       }
 
@@ -467,6 +476,7 @@ module.exports = {
   resumeCampaign,
   isCampaignRunning,
   isOtpCampaign,
+  shouldSkipBalanceForCampaign,
   prepareCampaignsForShutdown,
   resumeCampaignsAfterBoot
 };

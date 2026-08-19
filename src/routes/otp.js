@@ -3,7 +3,6 @@ const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const MessageLog = require('../models/MessageLog');
-const User = require('../models/User');
 const {
   sendMessage,
   isClientConnected,
@@ -12,6 +11,7 @@ const {
 const { normalizePhone } = require('../utils/helpers');
 const { resolveMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource, applySourceScope } = require('../utils/accountScope');
+const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
 const otpAuthMiddleware = require('../middleware/otpAuth');
 const authMiddleware = require('../middleware/auth');
 
@@ -125,27 +125,20 @@ router.post(
         });
       }
 
-      let billedUser = null;
-      if (req.user?.parentUserId) {
-        billedUser = req.user;
-      } else if (!req.user && source) {
-        billedUser = await User.findOne({
-          parentUserId: dbClient.userId,
-          source,
-          isActive: true
+      let billedUser = await resolveBilledUser({
+        user: req.user || null,
+        ownerUserId: dbClient.userId,
+        source
+      });
+      const balanceCheck = await requireMessageBalance(billedUser, 1);
+      if (!balanceCheck.ok) {
+        return res.status(403).json({
+          ok: false,
+          error: balanceCheck.error,
+          balanceExhausted: true,
+          currentBalance: balanceCheck.currentBalance || 0,
+          source
         });
-      }
-      if (billedUser) {
-        const balance = await User.getBalance(billedUser._id);
-        if (balance <= 0) {
-          return res.status(403).json({
-            ok: false,
-            error: 'You need to charge balance in message.',
-            balanceExhausted: true,
-            currentBalance: 0,
-            source
-          });
-        }
       }
 
       const sessionClientId = dbClient.clientId;
@@ -172,8 +165,7 @@ router.post(
 
       let remainingBalance = null;
       if (billedUser) {
-        await User.decrementBalance(billedUser._id, 1);
-        remainingBalance = await User.getBalance(billedUser._id);
+        remainingBalance = await chargeMessageBalance(billedUser, 1);
       }
 
       console.log(`✅ OTP sent to ${phone} via ${sessionClientId}${source ? ` source=${source}` : ''}`);
