@@ -272,7 +272,8 @@ const processCampaign = async (campaignId) => {
         direction: 'outgoing',
         status: success ? 'sent' : 'failed',
         whatsappMessageId: whatsappId,
-        error: error || undefined
+        error: error || undefined,
+        source: campaign.source || null
       });
 
       // Update campaign counters

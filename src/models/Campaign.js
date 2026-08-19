@@ -20,6 +20,7 @@ const mapRow = (row) => {
     pendingCount: row.pending_count,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    source: row.source || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -65,7 +66,8 @@ const buildUpdate = (update = {}) => {
     failedCount: 'failed_count',
     pendingCount: 'pending_count',
     startedAt: 'started_at',
-    completedAt: 'completed_at'
+    completedAt: 'completed_at',
+    source: 'source'
   };
 
   Object.entries(update).forEach(([key, value]) => {
@@ -89,12 +91,22 @@ const buildUpdate = (update = {}) => {
 };
 
 class CampaignModel {
+  static async ensureSourceColumn() {
+    try {
+      await query(`ALTER TABLE campaigns ADD COLUMN source VARCHAR(64) NULL AFTER completed_at`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+  }
+
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
       SELECT id, user_id, client_id, name, message, media_url, media_type, status,
              min_delay, max_delay, total_contacts, sent_count, failed_count,
-             pending_count, started_at, completed_at, created_at, updated_at
+             pending_count, started_at, completed_at, source, created_at, updated_at
       FROM campaigns
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
@@ -138,8 +150,8 @@ class CampaignModel {
       `INSERT INTO campaigns (
         id, user_id, client_id, name, message, media_url, media_type, status,
         min_delay, max_delay, total_contacts, sent_count, failed_count, pending_count,
-        started_at, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        started_at, completed_at, source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
         userId,
@@ -156,7 +168,8 @@ class CampaignModel {
         failedCount,
         pendingCount,
         data.startedAt || null,
-        data.completedAt || null
+        data.completedAt || null,
+        data.source || null
       ]
     );
     return this.findById(id);

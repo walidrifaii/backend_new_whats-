@@ -9,7 +9,9 @@ const {
   waitForClientReady
 } = require('../services/whatsappManager');
 const { normalizePhone } = require('../utils/helpers');
+const { resolveMessageSource, normalizeMessageSource } = require('../utils/messageSource');
 const otpAuthMiddleware = require('../middleware/otpAuth');
+const authMiddleware = require('../middleware/auth');
 
 const getOtpExpiresMinutes = () => {
   const n = parseInt(process.env.OTP_EXPIRES_MINUTES || '5', 10);
@@ -84,8 +86,9 @@ const otpAltValidator = body('otp')
 /**
  * POST /api/otp/send
  *
- * Body: { phone, code | otp, clientId?, message? }
+ * Body: { phone, code | otp, clientId?, message?, source? }
  * Auth: Bearer WHATSAPP_NODE_TOKEN (JWT) OR X-Service-Key OTP_SERVICE_SECRET
+ * Source: body.source / body.service / header X-Service-Name
  */
 router.post(
   '/send',
@@ -109,6 +112,7 @@ router.post(
     try {
       const phone = normalizePhone(req.body.phone).replace('@c.us', '');
       const userId = req.user?._id || null;
+      const source = resolveMessageSource(req);
       const dbClient = await resolveOtpClient(req.body.clientId, userId);
 
       if (!dbClient) {
@@ -137,10 +141,11 @@ router.post(
         message: text,
         direction: 'outgoing',
         status: 'sent',
-        whatsappMessageId: messageId
+        whatsappMessageId: messageId,
+        source
       });
 
-      console.log(`✅ OTP sent to ${phone} via ${sessionClientId}`);
+      console.log(`✅ OTP sent to ${phone} via ${sessionClientId}${source ? ` source=${source}` : ''}`);
 
       return res.json({
         ok: true,
@@ -148,7 +153,8 @@ router.post(
         channel: 'whatsapp_node',
         expires_in: getOtpExpiresMinutes() * 60,
         messageId,
-        clientId: sessionClientId
+        clientId: sessionClientId,
+        source
       });
     } catch (err) {
       console.error(`❌ OTP send failed:`, err.message);
@@ -160,5 +166,33 @@ router.post(
     }
   }
 );
+
+/**
+ * GET /api/otp/stats
+ * Counts OTP/outgoing messages per source for this dashboard account.
+ * Query: ?source=taaruf (optional filter)
+ */
+router.get('/stats', authMiddleware, async (req, res) => {
+  try {
+    const source = normalizeMessageSource(req.query.source);
+    const filter = { userId: req.user._id, direction: 'outgoing' };
+    if (source) filter.source = source;
+
+    const stats = await MessageLog.getStats(filter);
+    const bySource = await MessageLog.getStatsBySource({
+      userId: req.user._id,
+      direction: 'outgoing'
+    });
+
+    return res.json({
+      ok: true,
+      source: source || null,
+      stats: stats || { total: 0, sent: 0, failed: 0, received: 0, outgoing: 0, incoming: 0 },
+      bySource
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 module.exports = router;

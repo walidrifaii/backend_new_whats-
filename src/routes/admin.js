@@ -27,8 +27,30 @@ router.get('/users', async (req, res) => {
       statsMap[s.user_id] = {
         totalMessages: s.total_messages,
         sentCount: s.sent_count,
-        failedCount: s.failed_count
+        failedCount: s.failed_count,
+        bySource: []
       };
+    }
+
+    const sourceStats = await query(`
+      SELECT user_id,
+        COALESCE(NULLIF(source, ''), '_untagged') AS source,
+        COUNT(*) AS total_messages,
+        SUM(CASE WHEN status = 'sent' AND direction = 'outgoing' THEN 1 ELSE 0 END) AS sent_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+      FROM message_logs
+      GROUP BY user_id, COALESCE(NULLIF(source, ''), '_untagged')
+    `);
+    for (const s of sourceStats) {
+      if (!statsMap[s.user_id]) {
+        statsMap[s.user_id] = { totalMessages: 0, sentCount: 0, failedCount: 0, bySource: [] };
+      }
+      statsMap[s.user_id].bySource.push({
+        source: s.source,
+        totalMessages: s.total_messages,
+        sentCount: s.sent_count,
+        failedCount: s.failed_count
+      });
     }
 
     const clientCounts = await query(`
@@ -44,7 +66,7 @@ router.get('/users', async (req, res) => {
 
     const result = users.map(u => {
       const safe = u.toJSON();
-      safe.stats = statsMap[u._id] || { totalMessages: 0, sentCount: 0, failedCount: 0 };
+      safe.stats = statsMap[u._id] || { totalMessages: 0, sentCount: 0, failedCount: 0, bySource: [] };
       safe.clientCount = clientMap[u._id] || 0;
       return safe;
     });

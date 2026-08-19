@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   pending_count INT NOT NULL DEFAULT 0,
   started_at DATETIME NULL,
   completed_at DATETIME NULL,
+  source VARCHAR(64) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -103,11 +104,13 @@ CREATE TABLE IF NOT EXISTS message_logs (
   status ENUM('sent', 'failed', 'received') NOT NULL DEFAULT 'sent',
   whatsapp_message_id VARCHAR(255) NULL,
   error TEXT NULL,
+  source VARCHAR(64) NULL,
   timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_message_logs_user_timestamp (user_id, timestamp),
   KEY idx_message_logs_campaign_timestamp (campaign_id, timestamp),
   KEY idx_message_logs_client_timestamp (client_id, timestamp),
+  KEY idx_message_logs_user_source (user_id, source),
   CONSTRAINT fk_message_logs_user
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE,

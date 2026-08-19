@@ -15,6 +15,7 @@ const mapRow = (row) => {
     status: row.status,
     whatsappMessageId: row.whatsapp_message_id,
     error: row.error,
+    source: row.source || null,
     timestamp: row.timestamp
   };
 };
@@ -42,17 +43,44 @@ const buildFilter = (filter = {}) => {
     clauses.push('ml.status = ?');
     values.push(String(filter.status));
   }
+  if (filter.source !== undefined) {
+    if (filter.source === null || filter.source === '') {
+      clauses.push('(ml.source IS NULL OR ml.source = \'\')');
+    } else {
+      clauses.push('ml.source = ?');
+      values.push(String(filter.source));
+    }
+  }
   return { clauses, values };
 };
 
 class MessageLogModel {
+  static async ensureSourceColumn() {
+    try {
+      await query(
+        `ALTER TABLE message_logs ADD COLUMN source VARCHAR(64) NULL AFTER error`
+      );
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE message_logs ADD INDEX idx_message_logs_user_source (user_id, source)`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
+        throw err;
+      }
+    }
+  }
+
   static async create(data) {
     const id = generateObjectId();
     await query(
       `INSERT INTO message_logs (
         id, user_id, client_id, campaign_id, contact_id, phone, message, direction,
-        status, whatsapp_message_id, error, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        status, whatsapp_message_id, error, source, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         id,
         data.userId,
@@ -64,7 +92,8 @@ class MessageLogModel {
         data.direction || 'outgoing',
         data.status || 'sent',
         data.whatsappMessageId || null,
-        data.error || null
+        data.error || null,
+        data.source || null
       ]
     );
     return { _id: id, ...data };
@@ -76,7 +105,7 @@ class MessageLogModel {
       SELECT
         ml.id, ml.user_id, ml.client_id, ml.campaign_id, ml.contact_id,
         ml.phone, ml.message, ml.direction, ml.status,
-        ml.whatsapp_message_id, ml.error, ml.timestamp,
+        ml.whatsapp_message_id, ml.error, ml.source, ml.timestamp,
         wc.name AS client_name, wc.phone AS client_phone,
         c.name AS campaign_name
       FROM message_logs ml
@@ -131,6 +160,27 @@ class MessageLogModel {
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
     const rows = await query(sql, values);
     return rows[0] || null;
+  }
+
+  static async getStatsBySource(filter = {}) {
+    const { clauses, values } = buildFilter(filter);
+    let sql = `
+      SELECT
+        COALESCE(NULLIF(source, ''), '_untagged') AS source,
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'sent' AND direction = 'outgoing' THEN 1 ELSE 0 END) AS sent,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM message_logs ml
+    `;
+    if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
+    sql += ' GROUP BY COALESCE(NULLIF(source, \'\'), \'_untagged\') ORDER BY sent DESC';
+    const rows = await query(sql, values);
+    return rows.map((row) => ({
+      source: row.source,
+      total: Number(row.total || 0),
+      sent: Number(row.sent || 0),
+      failed: Number(row.failed || 0)
+    }));
   }
 }
 

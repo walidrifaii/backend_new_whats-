@@ -9,10 +9,8 @@ const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const { startCampaign, pauseCampaign, resumeCampaign, isOtpCampaign } = require('../services/campaignQueue');
 const { isClientConnected, waitForClientReady } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
-const {
-  resolveMediaUrlForDb,
-  resolveMediaTypeForDb
-} = require('../utils/campaignMedia');
+const { resolveMediaUrlForDb, resolveMediaTypeForDb } = require('../utils/campaignMedia');
+const { normalizeMessageSource } = require('../utils/messageSource');
 
 const formatCampaign = (campaign, client = null) => {
   if (!campaign) return campaign;
@@ -67,6 +65,7 @@ router.post('/', authMiddleware, [
     const mediaResolved = resolveMediaUrlForDb(req.body);
     const typeResolved = resolveMediaTypeForDb(req.body);
     const otpCampaign = String(name || '').startsWith('otp_');
+    const source = normalizeMessageSource(req.body.source || req.body.service || req.headers['x-service-name']);
 
     const client = await resolveWhatsAppClient(clientId, req.user._id);
     if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
@@ -80,7 +79,8 @@ router.post('/', authMiddleware, [
       mediaType: typeResolved.set ? typeResolved.value : null,
       minDelay: otpCampaign ? 0 : (minDelay || 20000),
       maxDelay: otpCampaign ? 0 : (maxDelay || 30000),
-      status: 'draft'
+      status: 'draft',
+      source
     });
 
     res.status(201).json({ campaign: formatCampaign(campaign, client) });

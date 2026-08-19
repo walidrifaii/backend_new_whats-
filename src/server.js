@@ -18,6 +18,8 @@ const adminRoutes    = require('./routes/admin');
 const TokenSession        = require('./models/TokenSession');
 const User                = require('./models/User');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
+const Campaign            = require('./models/Campaign');
+const MessageLog          = require('./models/MessageLog');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
 const MessageJob = require('./models/MessageJob');
@@ -45,7 +47,7 @@ const corsOptions = {
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Service-Key', 'X-Service-Name', 'X-Otp-Source'],
   credentials: false,
   optionsSuccessStatus: 204,
 };
@@ -86,6 +88,8 @@ app.get('/api/health', (_req, res) => {
       serviceKeyConfigured: serviceKey,
       jwtAuthAvailable: jwtAuth,
       endpoint: 'POST /api/otp/send',
+      statsEndpoint: 'GET /api/otp/stats',
+      source: 'Pass source in JSON body or header X-Service-Name so each Laravel app can be counted separately',
       auth: [
         ...(jwtAuth ? ['Authorization: Bearer <WHATSAPP_NODE_TOKEN>'] : []),
         ...(serviceKey ? ['X-Service-Key: <OTP_SERVICE_SECRET>'] : [])
@@ -220,6 +224,8 @@ testConnection()
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     await MessageJob.ensureTables();
+    await MessageLog.ensureSourceColumn();
+    await Campaign.ensureSourceColumn();
     console.log('✅ MySQL connected');
 
     server.listen(process.env.PORT || 5000, () => {
