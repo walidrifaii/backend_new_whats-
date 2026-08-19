@@ -5,7 +5,6 @@ const User = require('../models/User');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
-const { normalizeMessageSource } = require('../utils/messageSource');
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -174,35 +173,21 @@ router.post('/users/:id/service-accounts', [
       return res.status(400).json({ error: 'Cannot attach a service login to another service login. Use the WhatsApp owner account.' });
     }
 
-    const source = normalizeMessageSource(req.body.source);
-    if (!source) {
-      return res.status(400).json({ error: 'Source must be letters, numbers, dot, dash, or underscore' });
-    }
-
-    const email = String(req.body.email || '').trim().toLowerCase();
-    const existingEmail = await User.findOne({ email });
-    if (existingEmail) return res.status(400).json({ error: 'Email already registered' });
-
-    const existingSource = await User.findOne({ parentUserId: parent._id, source });
-    if (existingSource) {
-      return res.status(400).json({ error: `This owner already has a login for source "${source}"` });
-    }
-
-    const user = await User.create({
+    const user = await User.createServiceAccount({
+      parent,
       name: req.body.name,
-      email,
+      email: req.body.email,
       password: req.body.password,
-      parentUserId: parent._id,
-      source,
-      messageBalance: parseInt(req.body.messageBalance, 10) || 0
+      source: req.body.source,
+      messageBalance: req.body.messageBalance
     });
 
     res.status(201).json({
       user: user.toJSON(),
-      message: `Service login created for source "${source}". They share this owner's WhatsApp.`
+      message: `Service login created for source "${user.source}". They share this owner's WhatsApp.`
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
+const { isServiceAccount } = require('../utils/accountScope');
 
 const getTokenExpiryDate = (token) => {
   const decoded = jwt.decode(token);
@@ -84,9 +85,53 @@ router.post('/login', [
       ownerId: user._id,
       expiresAt: getTokenExpiryDate(token)
     });
-    return res.json({ token, user });
+    return res.json({ token, user: user.toJSON() });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+const issueUserSession = async (user) => {
+  let token = user.authToken;
+  if (!token || !isJwtUsable(token)) {
+    token = signPermanentUserToken(user._id);
+    await User.saveToken(user._id, token);
+  }
+  await TokenSession.createOrUpdate({
+    token,
+    ownerType: 'user',
+    ownerId: user._id,
+    expiresAt: getTokenExpiryDate(token)
+  });
+  return token;
+};
+
+// POST /api/auth/stats-login — service accounts only (solv / ehkini)
+router.post('/stats-login', [
+  body('email').isEmail(),
+  body('password').notEmpty()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user.isActive) return res.status(401).json({ error: 'Account is inactive' });
+    if (!isServiceAccount(user) || !user.source) {
+      return res.status(403).json({
+        error: 'This page is only for service logins (example: solv). Use the old /login for the WhatsApp owner dashboard.'
+      });
+    }
+
+    const token = await issueUserSession(user);
+    return res.json({ token, user: user.toJSON() });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -141,6 +186,52 @@ router.post('/logout', authMiddleware, async (req, res) => {
     return res.json({ message: 'Logged out successfully' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/service-accounts — child logins on this WhatsApp owner
+router.get('/service-accounts', authMiddleware, async (req, res) => {
+  try {
+    if (isServiceAccount(req.user)) {
+      return res.status(403).json({ error: 'Service logins cannot create other service logins' });
+    }
+    const accounts = await User.findByParentUserId(req.user._id);
+    res.json({ accounts: accounts.map((u) => u.toJSON()) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/service-accounts — owner adds solv/ehkini email+password+source
+router.post('/service-accounts', authMiddleware, [
+  body('name').trim().notEmpty().withMessage('Name is required'),
+  body('email').isEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('source').trim().notEmpty().withMessage('Source is required (example: solv)'),
+  body('messageBalance').optional().isInt({ min: 0 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    if (isServiceAccount(req.user)) {
+      return res.status(403).json({ error: 'Service logins cannot create other service logins' });
+    }
+    const parent = await User.findById(req.user._id);
+    const user = await User.createServiceAccount({
+      parent,
+      name: req.body.name,
+      email: req.body.email,
+      password: req.body.password,
+      source: req.body.source,
+      messageBalance: req.body.messageBalance
+    });
+    res.status(201).json({
+      user: user.toJSON(),
+      message: `Created ${user.source} login. They sign in at /stats-login and only see ${user.source} messages.`
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

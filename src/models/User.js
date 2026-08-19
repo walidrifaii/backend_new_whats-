@@ -162,6 +162,54 @@ class UserModel {
     return this.findById(id);
   }
 
+  static async findByParentUserId(parentUserId) {
+    const rows = await query(
+      `SELECT ${this.COLUMNS} FROM users WHERE parent_user_id = ? ORDER BY created_at DESC`,
+      [String(parentUserId)]
+    );
+    return rows.map(mapRowToUser);
+  }
+
+  static async createServiceAccount({ parent, name, email, password, source, messageBalance }) {
+    if (!parent || parent.parentUserId) {
+      const err = new Error('Use the WhatsApp owner account to add a service login');
+      err.status = 400;
+      throw err;
+    }
+
+    const { normalizeMessageSource } = require('../utils/messageSource');
+    const sourceName = normalizeMessageSource(source);
+    if (!sourceName) {
+      const err = new Error('Source must be letters, numbers, dot, dash, or underscore (example: solv)');
+      err.status = 400;
+      throw err;
+    }
+
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const existingEmail = await this.findOne({ email: cleanEmail });
+    if (existingEmail) {
+      const err = new Error('Email already registered');
+      err.status = 400;
+      throw err;
+    }
+
+    const existingSource = await this.findOne({ parentUserId: parent._id, source: sourceName });
+    if (existingSource) {
+      const err = new Error(`This account already has a login for source "${sourceName}"`);
+      err.status = 400;
+      throw err;
+    }
+
+    return this.create({
+      name,
+      email: cleanEmail,
+      password,
+      parentUserId: parent._id,
+      source: sourceName,
+      messageBalance: parseInt(messageBalance, 10) || 0
+    });
+  }
+
   static async updateBalance(userId, newBalance) {
     await query(
       `UPDATE users SET message_balance = ? WHERE id = ?`,
