@@ -21,9 +21,23 @@ const applySourceScope = (filter, user, requestedSource, allowedSources = null) 
     ? allowedSources.map((item) => normalizeMessageSource(item)).filter(Boolean)
     : null;
 
-  if (requested && allowed && allowed.length > 0 && !allowed.includes(requested)) {
+  if (allowed) {
+    if (allowed.length === 0) {
+      filter.sourceIn = [];
+      return filter;
+    }
+    if (requested && !allowed.includes(requested)) {
+      filter.sourceIn = [];
+      return filter;
+    }
+    if (requested) {
+      filter.source = requested;
+      return filter;
+    }
+    filter.sourceIn = allowed;
     return filter;
   }
+
   if (requested) filter.source = requested;
   return filter;
 };

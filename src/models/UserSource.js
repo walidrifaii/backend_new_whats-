@@ -92,6 +92,21 @@ class UserSourceModel {
     return this.listByUser(userId);
   }
 
+  static async remove(userId, sources = []) {
+    const names = [...new Set(
+      (Array.isArray(sources) ? sources : [sources])
+        .map((item) => normalizeMessageSource(item))
+        .filter(Boolean)
+    )];
+    if (!names.length) return 0;
+    const placeholders = names.map(() => '?').join(', ');
+    const result = await query(
+      `DELETE FROM user_sources WHERE user_id = ? AND source IN (${placeholders})`,
+      [String(userId), ...names]
+    );
+    return result?.affectedRows || 0;
+  }
+
   static async listKnownNames(ownerId) {
     const id = String(ownerId);
     const names = new Set();

@@ -67,7 +67,7 @@ const serializeSubscription = (sub, user = null) => {
     remaining: sub.remaining || 0,
     enabledSources: sub.enabledSources || [],
     sourceLimit: sub.sourceLimit || 0,
-    catalog: sub.knownSources || sub.enabledSources || [],
+    catalog: sub.enabledSources || [],
     currentSourceEnabled: currentSource
       ? (sub.enabledSources || []).includes(currentSource)
       : true

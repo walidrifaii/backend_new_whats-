@@ -43,7 +43,17 @@ const buildFilter = (filter = {}) => {
     clauses.push('ml.status = ?');
     values.push(String(filter.status));
   }
-  if (filter.source !== undefined) {
+  if (filter.sourceIn !== undefined) {
+    const names = (Array.isArray(filter.sourceIn) ? filter.sourceIn : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    if (names.length === 0) {
+      clauses.push('1 = 0');
+    } else {
+      clauses.push(`ml.source IN (${names.map(() => '?').join(', ')})`);
+      values.push(...names);
+    }
+  } else if (filter.source !== undefined) {
     if (filter.source === null || filter.source === '') {
       clauses.push('(ml.source IS NULL OR ml.source = \'\')');
     } else {

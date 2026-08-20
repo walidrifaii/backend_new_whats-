@@ -13,9 +13,8 @@ router.get('/', authMiddleware, async (req, res) => {
     const limitNumber = parseInt(limit, 10) || 50;
     const filter = { userId: getOwnerUserId(req.user) };
     const sub = await getOwnerSubscription(req.user);
-    const viewSources = (sub.knownSources && sub.knownSources.length)
-      ? sub.knownSources
-      : (sub.enabledSources || []);
+    const configured = (sub.sources || []).length > 0 || Boolean(sub.plan);
+    const viewSources = configured ? (sub.enabledSources || []) : null;
     applySourceScope(filter, req.user, source, viewSources);
 
     if (campaignId) filter.campaignId = campaignId;
@@ -44,20 +43,19 @@ router.get('/stats', authMiddleware, async (req, res) => {
     if (clientId) filter.clientId = clientId;
     if (campaignId) filter.campaignId = campaignId;
     const sub = await getOwnerSubscription(req.user);
-    const viewSources = (sub.knownSources && sub.knownSources.length)
-      ? sub.knownSources
-      : (sub.enabledSources || []);
+    const configured = (sub.sources || []).length > 0 || Boolean(sub.plan);
+    const viewSources = configured ? (sub.enabledSources || []) : null;
     applySourceScope(filter, req.user, source, viewSources);
 
     const stats = await MessageLog.getStats(filter);
-    const bySource = await MessageLog.getStatsBySource({
-      userId: getOwnerUserId(req.user)
-    });
+    const bySourceFilter = { userId: getOwnerUserId(req.user) };
+    applySourceScope(bySourceFilter, req.user, null, viewSources);
+    const bySource = await MessageLog.getStatsBySource(bySourceFilter);
     res.json({
       stats: stats || { total: 0, sent: 0, failed: 0, received: 0, outgoing: 0, incoming: 0 },
       bySource,
       enabledSources: sub.enabledSources || [],
-      knownSources: sub.knownSources || []
+      knownSources: sub.enabledSources || []
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

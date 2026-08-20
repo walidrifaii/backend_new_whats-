@@ -266,7 +266,7 @@ router.get('/service-accounts', authMiddleware, async (req, res) => {
     const sub = await getOwnerSubscription(req.user._id);
     res.json({
       accounts: accounts.map((u) => u.toJSON()),
-      knownSources: sub.knownSources || sub.enabledSources || []
+      knownSources: sub.enabledSources || []
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

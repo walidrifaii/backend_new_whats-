@@ -91,11 +91,9 @@ router.get('/users', async (req, res) => {
     const plans = await Plan.findAll();
     const plansById = new Map(plans.map((p) => [p._id, p]));
     const sourcesByOwner = {};
-    const catalogByOwner = {};
     for (const ownerId of ownerIds) {
       if (!ownerId) continue;
       sourcesByOwner[ownerId] = await UserSource.listByUser(ownerId);
-      catalogByOwner[ownerId] = await UserSource.listKnownNames(ownerId);
     }
     for (const row of result) {
       const ownerId = row.parentUserId || row._id;
@@ -105,7 +103,7 @@ router.get('/users', async (req, res) => {
       row.enabledSources = ownerSources
         .filter((item) => item.enabled)
         .map((item) => item.source);
-      row.sourceCatalog = catalogByOwner[ownerId] || [];
+      row.sourceCatalog = ownerSources.map((item) => item.source);
     }
 
     res.json({ users: result, plans });
@@ -314,6 +312,20 @@ router.patch('/users/:id/sources', async (req, res) => {
     const wanted = (Array.isArray(req.body.sources) ? req.body.sources : [])
       .map((item) => normalizeMessageSource(item))
       .filter(Boolean);
+    const toRemove = [...new Set(
+      (Array.isArray(req.body.remove) ? req.body.remove : [])
+        .map((item) => normalizeMessageSource(item))
+        .filter(Boolean)
+    )];
+
+    for (const name of toRemove) {
+      const locked = await User.findOne({ parentUserId: ownerId, source: name });
+      if (locked) {
+        return res.status(400).json({
+          error: `Cannot delete "${name}" while ${locked.email} is locked to it. Use Allow switch first.`
+        });
+      }
+    }
 
     const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : wanted.length);
     if (sub.status === 'active' && wanted.length > limit) {
@@ -322,7 +334,10 @@ router.patch('/users/:id/sources', async (req, res) => {
       });
     }
 
-    const sources = await UserSource.setEnabledSources(ownerId, wanted);
+    if (toRemove.length) {
+      await UserSource.remove(ownerId, toRemove);
+    }
+    const sources = await UserSource.setEnabledSources(ownerId, wanted.filter((name) => !toRemove.includes(name)));
     const next = await getOwnerSubscription(ownerId);
     res.json({
       sources,
