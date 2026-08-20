@@ -490,6 +490,66 @@ router.patch('/users/:id/sources', async (req, res) => {
   }
 });
 
+// POST /api/admin/users/:id/sources — add one source to a main service (owner)
+router.post('/users/:id/sources', [
+  body('source').trim().notEmpty().withMessage('Source name is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ownerId = user.parentUserId || user._id;
+    const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
+    if (!owner) return res.status(404).json({ error: 'Main service not found' });
+    if (owner.role === 'admin') {
+      return res.status(400).json({ error: 'Cannot assign a source to an admin login.' });
+    }
+
+    const sourceName = normalizeMessageSource(req.body.source);
+    if (!sourceName) {
+      return res.status(400).json({ error: 'Source must be letters, numbers, dot, dash, or underscore' });
+    }
+
+    const sub = await getOwnerSubscription(ownerId);
+    const existing = await UserSource.listByUser(ownerId);
+    const enabled = existing.filter((item) => item.enabled).map((item) => item.source);
+    const already = existing.find((item) => item.source === sourceName);
+
+    if (already?.enabled) {
+      return res.json({
+        sources: existing,
+        enabledSources: enabled,
+        source: sourceName,
+        message: `"${sourceName}" is already assigned to ${owner.name}`
+      });
+    }
+
+    const nextEnabled = [...new Set([...enabled, sourceName])];
+    const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : nextEnabled.length);
+    if (sub.status === 'active' && nextEnabled.length > limit) {
+      return res.status(400).json({
+        error: `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before adding another.`
+      });
+    }
+
+    await UserSource.upsert({ userId: ownerId, source: sourceName, enabled: true });
+    const sources = await UserSource.listByUser(ownerId);
+    const next = await getOwnerSubscription(ownerId);
+    res.status(already ? 200 : 201).json({
+      sources,
+      enabledSources: next.enabledSources,
+      subscription: serializeSubscription(next, owner),
+      source: sourceName,
+      ownerId: owner._id,
+      message: `"${sourceName}" assigned to ${owner.name}`
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 // PATCH /api/admin/users/:id/source-lock
 // null source = this email can switch among the owner's enabled sources
 router.patch('/users/:id/source-lock', async (req, res) => {
