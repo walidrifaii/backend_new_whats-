@@ -127,11 +127,6 @@ router.post('/stats-login', [
     if (user.role === 'admin') {
       return res.status(403).json({ error: 'Use /admin-login for the admin dashboard.' });
     }
-    if (isServiceAccount(user) && !user.source) {
-      return res.status(403).json({
-        error: 'This service login has no source. Ask an admin to set ehkini or solv on the account.'
-      });
-    }
 
     const token = await issueUserSession(user);
     const sub = await getOwnerSubscription(user);
@@ -268,18 +263,22 @@ router.get('/service-accounts', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'Service logins cannot create other service logins' });
     }
     const accounts = await User.findByParentUserId(req.user._id);
-    res.json({ accounts: accounts.map((u) => u.toJSON()) });
+    const sub = await getOwnerSubscription(req.user._id);
+    res.json({
+      accounts: accounts.map((u) => u.toJSON()),
+      knownSources: sub.knownSources || sub.enabledSources || []
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/auth/service-accounts — owner adds solv/ehkini email+password+source
+// POST /api/auth/service-accounts — owner adds a locked source email+password
 router.post('/service-accounts', authMiddleware, [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('source').trim().notEmpty().withMessage('Source is required (example: solv)'),
+  body('source').trim().notEmpty().withMessage('Source is required'),
   body('messageBalance').optional().isInt({ min: 0 })
 ], async (req, res) => {
   const errors = validationResult(req);

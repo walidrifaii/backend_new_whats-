@@ -208,7 +208,7 @@ class UserModel {
     const { normalizeMessageSource } = require('../utils/messageSource');
     const sourceName = normalizeMessageSource(source);
     if (!sourceName) {
-      const err = new Error('Source must be letters, numbers, dot, dash, or underscore (example: solv)');
+      const err = new Error('Source must be letters, numbers, dot, dash, or underscore');
       err.status = 400;
       throw err;
     }
@@ -253,6 +253,16 @@ class UserModel {
       source: sourceName,
       messageBalance: parseInt(messageBalance, 10) || 0
     });
+  }
+
+  static async setLockedSource(userId, source = null) {
+    const { normalizeMessageSource } = require('../utils/messageSource');
+    const sourceName = source == null || source === '' ? null : normalizeMessageSource(source);
+    await query(
+      `UPDATE users SET source = ? WHERE id = ?`,
+      [sourceName, String(userId)]
+    );
+    return this.findById(userId);
   }
 
   static async updateBalance(userId, newBalance) {

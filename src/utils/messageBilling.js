@@ -4,7 +4,7 @@ const { normalizeMessageSource } = require('./messageSource');
 /**
  * Who pays for a send:
  * 1. Owner with an active plan → owner (shared plan quota)
- * 2. Logged-in service account (ehkini/solv) → that account
+ * 2. Logged-in service account → that account
  * 3. Else source + owner WhatsApp account → matching child login
  * 4. Else the logged-in owner
  */

@@ -92,6 +92,32 @@ class UserSourceModel {
     return this.listByUser(userId);
   }
 
+  static async listKnownNames(ownerId) {
+    const id = String(ownerId);
+    const names = new Set();
+    const rows = await this.listByUser(id);
+    for (const row of rows) {
+      if (row.source) names.add(row.source);
+    }
+    const childRows = await query(
+      `SELECT DISTINCT source FROM users WHERE parent_user_id = ? AND source IS NOT NULL AND source <> ''`,
+      [id]
+    );
+    for (const row of childRows) {
+      const name = normalizeMessageSource(row.source);
+      if (name) names.add(name);
+    }
+    const logRows = await query(
+      `SELECT DISTINCT source FROM message_logs WHERE user_id = ? AND source IS NOT NULL AND source <> ''`,
+      [id]
+    );
+    for (const row of logRows) {
+      const name = normalizeMessageSource(row.source);
+      if (name) names.add(name);
+    }
+    return [...names].sort();
+  }
+
   static async countEnabled(userId) {
     const rows = await query(
       `SELECT COUNT(*) AS total FROM user_sources WHERE user_id = ? AND enabled = 1`,

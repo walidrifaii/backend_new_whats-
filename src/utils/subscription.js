@@ -4,8 +4,6 @@ const UserSource = require('../models/UserSource');
 const { getOwnerUserId } = require('./accountScope');
 const { normalizeMessageSource } = require('./messageSource');
 
-const SOURCE_CATALOG = ['ehkini', 'solv'];
-
 const getOwnerSubscription = async (userOrOwnerId) => {
   const ownerId = typeof userOrOwnerId === 'object'
     ? getOwnerUserId(userOrOwnerId)
@@ -17,6 +15,7 @@ const getOwnerSubscription = async (userOrOwnerId) => {
       status: 'none',
       sources: [],
       enabledSources: [],
+      knownSources: [],
       remaining: 0
     };
   }
@@ -27,6 +26,7 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const plan = owner?.planId ? await Plan.findById(owner.planId) : null;
   const sources = await UserSource.listByUser(ownerId);
   const enabledSources = sources.filter((row) => row.enabled).map((row) => row.source);
+  const knownSources = await UserSource.listKnownNames(ownerId);
   const status = owner?.planStatus || 'none';
 
   return {
@@ -36,6 +36,7 @@ const getOwnerSubscription = async (userOrOwnerId) => {
     status,
     sources,
     enabledSources,
+    knownSources,
     remaining: owner?.messageBalance ?? 0,
     sourceLimit: plan?.sourceLimit || 0
   };
@@ -66,7 +67,7 @@ const serializeSubscription = (sub, user = null) => {
     remaining: sub.remaining || 0,
     enabledSources: sub.enabledSources || [],
     sourceLimit: sub.sourceLimit || 0,
-    catalog: SOURCE_CATALOG,
+    catalog: sub.knownSources || sub.enabledSources || [],
     currentSourceEnabled: currentSource
       ? (sub.enabledSources || []).includes(currentSource)
       : true
@@ -85,13 +86,13 @@ const assertSourceAllowed = (sub, source) => {
   if (activePlan && enabled.length === 0) {
     return {
       ok: false,
-      error: 'No sources are enabled on this plan. Ask an admin to enable ehkini or solv.'
+      error: 'No sources are enabled on this plan. Ask an admin to enable a source.'
     };
   }
 
   if (!sourceName) {
     if (enabled.length > 0) {
-      return { ok: false, error: 'source is required (example: ehkini or solv).' };
+      return { ok: false, error: 'source is required.' };
     }
     return { ok: true, source: null };
   }
@@ -123,7 +124,6 @@ const assignPlanToOwner = async (owner, plan, { refillBalance = true } = {}) => 
 };
 
 module.exports = {
-  SOURCE_CATALOG,
   getOwnerSubscription,
   serializeSubscription,
   assertSourceAllowed,

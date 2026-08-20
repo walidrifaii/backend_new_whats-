@@ -7,7 +7,7 @@ const UserSource = require('../models/UserSource');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
-const { SOURCE_CATALOG, getOwnerSubscription, serializeSubscription, assignPlanToOwner } = require('../utils/subscription');
+const { getOwnerSubscription, serializeSubscription, assignPlanToOwner } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 
 router.use(authMiddleware, adminMiddleware);
@@ -87,21 +87,25 @@ router.get('/users', async (req, res) => {
       return safe;
     });
 
-    const ownerIds = result.filter((u) => !u.parentUserId && u.role !== 'admin').map((u) => u._id);
+    const ownerIds = [...new Set(result.map((u) => u.parentUserId || u._id))];
     const plans = await Plan.findAll();
     const plansById = new Map(plans.map((p) => [p._id, p]));
     const sourcesByOwner = {};
+    const catalogByOwner = {};
     for (const ownerId of ownerIds) {
+      if (!ownerId) continue;
       sourcesByOwner[ownerId] = await UserSource.listByUser(ownerId);
+      catalogByOwner[ownerId] = await UserSource.listKnownNames(ownerId);
     }
     for (const row of result) {
       const ownerId = row.parentUserId || row._id;
       const plan = plansById.get(row.planId);
+      const ownerSources = sourcesByOwner[ownerId] || [];
       row.plan = plan || null;
-      row.enabledSources = (sourcesByOwner[ownerId] || [])
+      row.enabledSources = ownerSources
         .filter((item) => item.enabled)
         .map((item) => item.source);
-      row.sourceCatalog = SOURCE_CATALOG;
+      row.sourceCatalog = catalogByOwner[ownerId] || [];
     }
 
     res.json({ users: result, plans });
@@ -176,12 +180,12 @@ router.patch('/users/:id/toggle-active', async (req, res) => {
   }
 });
 
-// POST /api/admin/users/:id/service-accounts — create ehkini/solv login on this WhatsApp owner
+// POST /api/admin/users/:id/service-accounts — create a locked source login on this WhatsApp owner
 router.post('/users/:id/service-accounts', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('source').trim().notEmpty().withMessage('Source is required (example: ehkini or solv)'),
+  body('source').trim().notEmpty().withMessage('Source is required'),
   body('messageBalance').optional().isInt({ min: 0 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -325,6 +329,49 @@ router.patch('/users/:id/sources', async (req, res) => {
       enabledSources: next.enabledSources,
       subscription: serializeSubscription(next, owner),
       message: 'Sources updated'
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/users/:id/source-lock
+// null source = this email can switch among the owner's enabled sources
+router.patch('/users/:id/source-lock', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.parentUserId) {
+      return res.status(400).json({
+        error: 'The owner already switches from /stats. Enable sources on this owner with Sources.'
+      });
+    }
+
+    const raw = req.body.source;
+    const lockTo = raw == null || raw === '' ? null : normalizeMessageSource(raw);
+    if (raw && !lockTo) {
+      return res.status(400).json({ error: 'Invalid source name' });
+    }
+
+    if (lockTo) {
+      const sibling = await User.findOne({ parentUserId: user.parentUserId, source: lockTo });
+      if (sibling && String(sibling._id) !== String(user._id)) {
+        return res.status(400).json({
+          error: `Another login is already locked to "${lockTo}".`
+        });
+      }
+    }
+
+    const updated = await User.setLockedSource(user._id, lockTo);
+    const next = await getOwnerSubscription(user.parentUserId);
+    res.json({
+      user: updated.toJSON(),
+      enabledSources: next.enabledSources,
+      message: lockTo
+        ? `This login is locked to ${lockTo} and cannot switch.`
+        : (next.enabledSources.length >= 2
+          ? `This email can switch sources. Enabled: ${next.enabledSources.join(', ')}.`
+          : 'Source lock removed. Enable at least 2 real sources on the owner so they can switch.')
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
