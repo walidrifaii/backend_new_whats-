@@ -158,8 +158,30 @@ router.get('/users', async (req, res) => {
       clientMap[c.user_id] = c.count;
     }
 
+    const clientPhones = await query(`
+      SELECT user_id, phone, name, status
+      FROM whatsapp_clients
+      WHERE is_active = 1
+        AND phone IS NOT NULL
+        AND TRIM(phone) <> ''
+      ORDER BY (status = 'connected') DESC, created_at DESC
+    `);
+    const phonesMap = {};
+    for (const row of clientPhones) {
+      const ownerId = String(row.user_id);
+      if (!phonesMap[ownerId]) phonesMap[ownerId] = [];
+      const phone = String(row.phone || '').trim();
+      if (phonesMap[ownerId].some((item) => item.phone === phone)) continue;
+      phonesMap[ownerId].push({
+        phone,
+        name: row.name || '',
+        status: row.status || ''
+      });
+    }
+
     const result = users.map(u => {
       const safe = u.toJSON();
+      const ownerId = u.parentUserId || u._id;
       if (u.parentUserId && u.source) {
         const parentStats = statsMap[u.parentUserId];
         const src = (parentStats?.bySource || []).find((row) => row.source === u.source);
@@ -174,6 +196,7 @@ router.get('/users', async (req, res) => {
         safe.stats = statsMap[u._id] || { totalMessages: 0, sentCount: 0, failedCount: 0, bySource: [] };
         safe.clientCount = clientMap[u._id] || 0;
       }
+      safe.phones = phonesMap[ownerId] || [];
       return safe;
     });
 
