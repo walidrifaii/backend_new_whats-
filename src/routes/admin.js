@@ -2,10 +2,12 @@ const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
 const UserSource = require('../models/UserSource');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
+const TokenSession = require('../models/TokenSession');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
@@ -19,6 +21,75 @@ const resolveOwner = async (userId) => {
   if (!user) return null;
   if (user.parentUserId) return User.findById(user.parentUserId);
   return user;
+};
+
+const getPublicApiBase = (req) => {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  return host ? `${proto}://${host}/api` : '';
+};
+
+const issueAccountToken = async (user) => {
+  const token = jwt.sign({ userId: user._id, type: 'user' }, process.env.JWT_SECRET);
+  await User.saveToken(user._id, token);
+  await TokenSession.createOrUpdate({
+    token,
+    ownerType: 'user',
+    ownerId: user._id,
+    expiresAt: null
+  });
+  return token;
+};
+
+const ensureAccountToken = async (user) => {
+  if (user.authToken) {
+    const valid = await TokenSession.isValid(user.authToken);
+    if (valid) return user.authToken;
+  }
+  return issueAccountToken(user);
+};
+
+const buildCredentialsPayload = async (req, user) => {
+  const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
+  const token = await ensureAccountToken(user);
+  const clients = owner
+    ? await WhatsAppClientModel.find({ userId: owner._id, isActive: true }, { sort: { createdAt: -1 } })
+    : [];
+  const apiBaseUrl = getPublicApiBase(req);
+  const primaryClient = clients.find((item) => item.status === 'connected') || clients[0] || null;
+  const source = user.source || '';
+  const envLines = [
+    `WHATSAPP_NODE_URL=${apiBaseUrl}`,
+    `WHATSAPP_NODE_TOKEN=${token}`,
+    primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient.clientId}` : 'WHATSAPP_NODE_CLIENT_ID=',
+    source ? `WHATSAPP_NODE_SOURCE=${source}` : null
+  ].filter(Boolean);
+
+  return {
+    account: {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      source: source || null,
+      parentUserId: user.parentUserId || null
+    },
+    owner: owner
+      ? { _id: owner._id, name: owner.name, email: owner.email }
+      : null,
+    token,
+    apiBaseUrl,
+    otpUrl: apiBaseUrl ? `${apiBaseUrl}/otp/send` : '',
+    source: source || null,
+    sharesOwnerWhatsApp: Boolean(user.parentUserId),
+    clients: clients.map((item) => ({
+      _id: item._id,
+      name: item.name,
+      clientId: item.clientId,
+      status: item.status,
+      phone: item.phone || null
+    })),
+    laravelEnv: envLines.join('\n')
+  };
 };
 
 router.use(authMiddleware, adminMiddleware);
@@ -529,6 +600,38 @@ router.get('/clients/:id/qr-share-link', async (req, res) => {
       status: client.status,
       qrCode: client.qrCode || null,
       name: client.name
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/users/:id/credentials — token + WhatsApp client IDs for other servers
+router.get('/users/:id/credentials', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const credentials = await buildCredentialsPayload(req, user);
+    res.json(credentials);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/credentials/regenerate — new token for this account
+router.post('/users/:id/credentials/regenerate', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.authToken) {
+      await TokenSession.revoke(user.authToken);
+    }
+    await issueAccountToken(user);
+    const next = await User.findById(user._id);
+    const credentials = await buildCredentialsPayload(req, next);
+    res.json({
+      ...credentials,
+      message: 'New token created. Update the other server with this token.'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
