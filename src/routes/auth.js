@@ -108,7 +108,7 @@ const issueUserSession = async (user) => {
   return token;
 };
 
-// POST /api/auth/stats-login — service accounts only (solv / ehkini)
+// POST /api/auth/stats-login — owner (source switcher) or locked service login
 router.post('/stats-login', [
   body('email').isEmail(),
   body('password').notEmpty()
@@ -124,9 +124,12 @@ router.post('/stats-login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
     if (!user.isActive) return res.status(401).json({ error: 'Account is inactive' });
-    if (!isServiceAccount(user) || !user.source) {
+    if (user.role === 'admin') {
+      return res.status(403).json({ error: 'Use /admin-login for the admin dashboard.' });
+    }
+    if (isServiceAccount(user) && !user.source) {
       return res.status(403).json({
-        error: 'This page is only for service logins (example: solv). Use the old /login for the WhatsApp owner dashboard.'
+        error: 'This service login has no source. Ask an admin to set ehkini or solv on the account.'
       });
     }
 

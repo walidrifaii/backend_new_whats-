@@ -10,22 +10,18 @@ const isServiceAccount = (user) => Boolean(user?.parentUserId);
 const getLockedSource = (user) => normalizeMessageSource(user?.source);
 
 const applySourceScope = (filter, user, requestedSource, allowedSources = null) => {
-  const requested = normalizeMessageSource(requestedSource);
   const locked = getLockedSource(user);
+  if (locked) {
+    filter.source = locked;
+    return filter;
+  }
+
+  const requested = normalizeMessageSource(requestedSource);
   const allowed = Array.isArray(allowedSources)
     ? allowedSources.map((item) => normalizeMessageSource(item)).filter(Boolean)
     : null;
 
-  if (requested && allowed && allowed.includes(requested)) {
-    filter.source = requested;
-    return filter;
-  }
-  if (requested && (!allowed || allowed.length === 0)) {
-    filter.source = requested;
-    return filter;
-  }
-  if (locked) {
-    filter.source = locked;
+  if (requested && allowed && allowed.length > 0 && !allowed.includes(requested)) {
     return filter;
   }
   if (requested) filter.source = requested;
