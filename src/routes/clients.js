@@ -5,7 +5,7 @@ const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
-const { buildClientQrToken } = require('../utils/qrShare');
+const { buildQrSharePayload } = require('../utils/qrShare');
 const { getOwnerUserId, isServiceAccount } = require('../utils/accountScope');
 
 const rejectServiceAccountWrite = (req, res) => {
@@ -21,18 +21,6 @@ const withTimeout = (promise, ms, message) => {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
   ]);
-};
-
-const buildQrSharePayload = (req, clientId) => {
-  const token = buildClientQrToken(clientId);
-  if (!token) return null;
-
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  return {
-    clientId,
-    pageUrl: `${baseUrl}/public/qr/${clientId}?token=${token}`,
-    imageUrl: `${baseUrl}/public/qr/${clientId}.png?token=${token}`
-  };
 };
 
 // GET /api/clients - list all clients for user

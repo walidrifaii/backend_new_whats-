@@ -12,6 +12,22 @@ const buildClientQrToken = (clientId) => {
     .digest('hex');
 };
 
+const buildQrSharePayload = (req, clientId) => {
+  const token = buildClientQrToken(clientId);
+  if (!token || !clientId) return null;
+
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  if (!host) return null;
+  const baseUrl = `${proto}://${host}`;
+  return {
+    clientId,
+    token,
+    pageUrl: `${baseUrl}/public/qr/${clientId}?token=${token}`,
+    imageUrl: `${baseUrl}/public/qr/${clientId}.png?token=${token}`
+  };
+};
+
 const isClientQrTokenValid = (clientId, providedToken) => {
   const expected = buildClientQrToken(clientId);
   const provided = String(providedToken || '').trim();
@@ -26,5 +42,6 @@ const isClientQrTokenValid = (clientId, providedToken) => {
 
 module.exports = {
   buildClientQrToken,
+  buildQrSharePayload,
   isClientQrTokenValid
 };

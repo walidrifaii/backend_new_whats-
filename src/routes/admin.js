@@ -1,14 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
+const { v4: uuidv4 } = require('uuid');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
 const UserSource = require('../models/UserSource');
+const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
+const { createWhatsAppClient, isClientConnected } = require('../services/whatsappManager');
 const { getOwnerSubscription, serializeSubscription, assignPlanToOwner } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
+const { buildQrSharePayload } = require('../utils/qrShare');
+
+const resolveOwner = async (userId) => {
+  const user = await User.findById(userId);
+  if (!user) return null;
+  if (user.parentUserId) return User.findById(user.parentUserId);
+  return user;
+};
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -390,6 +401,137 @@ router.patch('/users/:id/source-lock', async (req, res) => {
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/users/:id/clients — WhatsApp clients for this owner
+router.get('/users/:id/clients', async (req, res) => {
+  try {
+    const owner = await resolveOwner(req.params.id);
+    if (!owner) return res.status(404).json({ error: 'User not found' });
+
+    const clients = await WhatsAppClientModel.find(
+      { userId: owner._id, isActive: true },
+      { sort: { createdAt: -1 } }
+    );
+    res.json({
+      userId: owner._id,
+      ownerName: owner.name,
+      ownerEmail: owner.email,
+      count: clients.length,
+      clients
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/clients — create WhatsApp client on this owner
+router.post('/users/:id/clients', [
+  body('name').trim().notEmpty().withMessage('Client name is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const owner = await resolveOwner(req.params.id);
+    if (!owner) return res.status(404).json({ error: 'User not found' });
+    if (owner.role === 'admin') {
+      return res.status(400).json({ error: 'Cannot create a WhatsApp client on an admin login.' });
+    }
+
+    const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+    const createdClient = await WhatsAppClientModel.create({
+      userId: owner._id,
+      name: req.body.name,
+      clientId,
+      sessionPath: `./sessions/${clientId}`,
+      status: 'disconnected'
+    });
+
+    const client = await WhatsAppClientModel.findByIdAndUpdate(
+      createdClient._id,
+      { status: 'initializing' },
+      { new: true }
+    );
+
+    res.status(201).json({
+      client,
+      qrShare: buildQrSharePayload(req, client.clientId),
+      message: 'WhatsApp client created. Open Share QR and scan when the code appears.'
+    });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(client.clientId);
+      } catch (err) {
+        console.error(`Admin init error for ${client.clientId}:`, err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/clients/:id/connect — start QR for any owner's client
+router.post('/clients/:id/connect', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({
+      _id: req.params.id,
+      isActive: true
+    });
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    if (client.status === 'connected' && isClientConnected(client.clientId)) {
+      return res.json({
+        message: 'Client already connected',
+        client,
+        qrShare: buildQrSharePayload(req, client.clientId)
+      });
+    }
+
+    await WhatsAppClientModel.findByIdAndUpdate(client._id, { status: 'initializing' });
+    res.json({
+      message: 'WhatsApp initialization started. Open Share QR and scan when ready.',
+      clientId: client.clientId,
+      qrShare: buildQrSharePayload(req, client.clientId)
+    });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(client.clientId);
+      } catch (err) {
+        console.error(`Admin init error for ${client.clientId}:`, err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/clients/:id/qr-share-link — public scan page for this client
+router.get('/clients/:id/qr-share-link', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({
+      _id: req.params.id,
+      isActive: true
+    });
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const qrShare = buildQrSharePayload(req, client.clientId);
+    if (!qrShare) {
+      return res.status(500).json({
+        error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
+      });
+    }
+    res.json({
+      ...qrShare,
+      status: client.status,
+      qrCode: client.qrCode || null,
+      name: client.name
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
