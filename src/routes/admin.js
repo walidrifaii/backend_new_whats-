@@ -10,7 +10,7 @@ const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { createWhatsAppClient, isClientConnected } = require('../services/whatsappManager');
-const { getOwnerSubscription, serializeSubscription, assignPlanToOwner } = require('../utils/subscription');
+const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { buildQrSharePayload } = require('../utils/qrShare');
 
@@ -282,17 +282,15 @@ router.patch('/users/:id/plan', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.parentUserId) {
-      return res.status(400).json({ error: 'Assign the plan on the WhatsApp owner account, not the service login.' });
-    }
 
     const planId = req.body.planId ? String(req.body.planId) : '';
     if (!planId) {
       await User.setPlan(user._id, null, 'none');
-      const sub = await getOwnerSubscription(user._id);
+      const updated = await User.findById(user._id);
+      const sub = await getAccountSubscription(updated);
       return res.json({
-        user: (await User.findById(user._id)).toJSON(),
-        subscription: serializeSubscription(sub, user),
+        user: updated.toJSON(),
+        subscription: serializeSubscription(sub, updated),
         message: 'Plan removed'
       });
     }
@@ -300,12 +298,14 @@ router.patch('/users/:id/plan', async (req, res) => {
     const plan = await Plan.findById(planId);
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
     const refillBalance = req.body.refillBalance !== false;
-    const sub = await assignPlanToOwner(user, plan, { refillBalance });
+    const sub = await assignPlanToUser(user, plan, { refillBalance });
     const updated = await User.findById(user._id);
     res.json({
       user: updated.toJSON(),
       subscription: serializeSubscription(sub, updated),
-      message: `Assigned ${plan.name} (${plan.messageQuota} messages, ${plan.sourceLimit} sources)`
+      message: user.parentUserId
+        ? `Assigned ${plan.name} (${plan.messageQuota} messages). WhatsApp stays on the owner.`
+        : `Assigned ${plan.name} (${plan.messageQuota} messages, ${plan.sourceLimit} sources)`
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

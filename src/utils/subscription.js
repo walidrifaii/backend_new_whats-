@@ -42,32 +42,61 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   };
 };
 
+const getAccountSubscription = async (userOrId) => {
+  const user = typeof userOrId === 'object' && userOrId?._id
+    ? userOrId
+    : await User.findById(userOrId);
+  if (!user) {
+    return getOwnerSubscription(null);
+  }
+  if (!user.parentUserId) {
+    const sub = await getOwnerSubscription(user);
+    return { ...sub, sharesOwnerWhatsApp: false };
+  }
+
+  const fresh = await User.findById(user._id);
+  const ownerSub = await getOwnerSubscription(user.parentUserId);
+  const plan = fresh?.planId ? await Plan.findById(fresh.planId) : null;
+  const status = fresh?.planStatus || 'none';
+  return {
+    owner: ownerSub.owner,
+    billedUser: fresh,
+    plan: status === 'active' ? plan : null,
+    requestedPlan: plan,
+    status,
+    sources: ownerSub.sources,
+    enabledSources: ownerSub.enabledSources,
+    knownSources: ownerSub.knownSources,
+    remaining: fresh?.messageBalance ?? 0,
+    sourceLimit: 0,
+    sharesOwnerWhatsApp: true
+  };
+};
+
 const serializeSubscription = (sub, user = null) => {
   const currentSource = normalizeMessageSource(user?.source);
+  const isService = Boolean(user?.parentUserId || sub.sharesOwnerWhatsApp);
+  const sourceLimit = isService ? 0 : (sub.sourceLimit || sub.plan?.sourceLimit || 0);
+  const mapPlan = (plan) => (
+    plan
+      ? {
+          _id: plan._id,
+          name: plan.name,
+          slug: plan.slug,
+          messageQuota: plan.messageQuota,
+          sourceLimit: isService ? 0 : plan.sourceLimit
+        }
+      : null
+  );
   return {
-    plan: sub.plan
-      ? {
-          _id: sub.plan._id,
-          name: sub.plan.name,
-          slug: sub.plan.slug,
-          messageQuota: sub.plan.messageQuota,
-          sourceLimit: sub.plan.sourceLimit
-        }
-      : null,
-    requestedPlan: sub.status === 'pending' && sub.requestedPlan
-      ? {
-          _id: sub.requestedPlan._id,
-          name: sub.requestedPlan.name,
-          slug: sub.requestedPlan.slug,
-          messageQuota: sub.requestedPlan.messageQuota,
-          sourceLimit: sub.requestedPlan.sourceLimit
-        }
-      : null,
+    plan: mapPlan(sub.plan),
+    requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
     status: sub.status || 'none',
     remaining: sub.remaining || 0,
     enabledSources: sub.enabledSources || [],
-    sourceLimit: sub.sourceLimit || 0,
+    sourceLimit,
     catalog: sub.enabledSources || [],
+    sharesOwnerWhatsApp: isService,
     currentSourceEnabled: currentSource
       ? (sub.enabledSources || []).includes(currentSource)
       : true
@@ -80,25 +109,31 @@ const assertSourceAllowed = (_sub, source) => {
   return { ok: true, source: normalizeMessageSource(source) };
 };
 
-const assignPlanToOwner = async (owner, plan, { refillBalance = true } = {}) => {
-  await User.setPlan(owner._id, plan._id, 'active');
+const assignPlanToUser = async (user, plan, { refillBalance = true } = {}) => {
+  await User.setPlan(user._id, plan._id, 'active');
   if (refillBalance) {
-    await User.updateBalance(owner._id, plan.messageQuota);
+    await User.updateBalance(user._id, plan.messageQuota);
   }
-  const enabledCount = await UserSource.countEnabled(owner._id);
-  if (enabledCount > plan.sourceLimit) {
-    const sources = await UserSource.listByUser(owner._id);
-    const enabled = sources.filter((row) => row.enabled);
-    for (const extra of enabled.slice(plan.sourceLimit)) {
-      await UserSource.upsert({ userId: owner._id, source: extra.source, enabled: false });
+  if (!user.parentUserId) {
+    const enabledCount = await UserSource.countEnabled(user._id);
+    if (enabledCount > plan.sourceLimit) {
+      const sources = await UserSource.listByUser(user._id);
+      const enabled = sources.filter((row) => row.enabled);
+      for (const extra of enabled.slice(plan.sourceLimit)) {
+        await UserSource.upsert({ userId: user._id, source: extra.source, enabled: false });
+      }
     }
   }
-  return getOwnerSubscription(owner._id);
+  return getAccountSubscription(user._id);
 };
+
+const assignPlanToOwner = assignPlanToUser;
 
 module.exports = {
   getOwnerSubscription,
+  getAccountSubscription,
   serializeSubscription,
   assertSourceAllowed,
+  assignPlanToUser,
   assignPlanToOwner
 };

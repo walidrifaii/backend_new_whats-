@@ -1,12 +1,15 @@
 const User = require('../models/User');
 const { normalizeMessageSource } = require('./messageSource');
 
+const hasActivePlan = (account) => Boolean(account?.planStatus === 'active' && account.planId);
+
 /**
  * Who pays for a send:
- * 1. Owner with an active plan → owner (shared plan quota)
- * 2. Logged-in service account → that account
- * 3. Else source + owner WhatsApp account → matching child login
- * 4. Else the logged-in owner
+ * 1. Source/service login with its own active plan
+ * 2. Owner with an active plan
+ * 3. Matching source login (extra balance)
+ * 4. Logged-in user / owner
+ * WhatsApp always stays on the owner.
  */
 const resolveBilledUser = async ({ user = null, ownerUserId = null, source = null } = {}) => {
   const parentId = ownerUserId || (user?.parentUserId ? user.parentUserId : (user && !user.parentUserId ? user._id : null));
@@ -14,23 +17,21 @@ const resolveBilledUser = async ({ user = null, ownerUserId = null, source = nul
     ? (user && !user.parentUserId && String(user._id) === String(parentId) ? user : await User.findById(parentId))
     : null;
 
-  if (owner?.planStatus === 'active' && owner.planId) {
-    return owner;
-  }
-
-  if (user?.parentUserId) return user;
-
-  const sourceName = normalizeMessageSource(source);
-
-  if (sourceName && parentId) {
-    const serviceUser = await User.findOne({
+  const sourceName = normalizeMessageSource(source) || normalizeMessageSource(user?.source);
+  let serviceUser = null;
+  if (user?.parentUserId) {
+    serviceUser = user;
+  } else if (sourceName && parentId) {
+    serviceUser = await User.findOne({
       parentUserId: String(parentId),
       source: sourceName,
       isActive: true
     });
-    if (serviceUser) return serviceUser;
   }
 
+  if (hasActivePlan(serviceUser)) return serviceUser;
+  if (hasActivePlan(owner)) return owner;
+  if (serviceUser) return serviceUser;
   if (user) return user;
   return owner || null;
 };

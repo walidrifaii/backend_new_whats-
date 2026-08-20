@@ -6,9 +6,9 @@ const User = require('../models/User');
 const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
-const { isServiceAccount, getOwnerUserId } = require('../utils/accountScope');
+const { isServiceAccount } = require('../utils/accountScope');
 const Plan = require('../models/Plan');
-const { getOwnerSubscription, serializeSubscription } = require('../utils/subscription');
+const { getOwnerSubscription, getAccountSubscription, serializeSubscription } = require('../utils/subscription');
 
 const getTokenExpiryDate = (token) => {
   const decoded = jwt.decode(token);
@@ -129,7 +129,7 @@ router.post('/stats-login', [
     }
 
     const token = await issueUserSession(user);
-    const sub = await getOwnerSubscription(user);
+    const sub = await getAccountSubscription(user);
     const remaining = sub.status === 'active' ? sub.remaining : user.messageBalance;
     return res.json({
       token,
@@ -184,7 +184,7 @@ router.post('/admin-login', [
 // GET /api/auth/me
 router.get('/me', authMiddleware, async (req, res) => {
   try {
-    const sub = await getOwnerSubscription(req.user);
+    const sub = await getAccountSubscription(req.user);
     const remaining = sub.status === 'active' ? sub.remaining : (req.user.messageBalance ?? 0);
     res.json({
       user: {
@@ -211,7 +211,7 @@ router.get('/plans', authMiddleware, async (_req, res) => {
 // GET /api/auth/subscription
 router.get('/subscription', authMiddleware, async (req, res) => {
   try {
-    const sub = await getOwnerSubscription(req.user);
+    const sub = await getAccountSubscription(req.user);
     res.json({ subscription: serializeSubscription(sub, req.user), remaining: sub.remaining });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -225,18 +225,16 @@ router.post('/subscription/request', authMiddleware, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
-    const ownerId = getOwnerUserId(req.user);
-    const owner = await User.findById(ownerId);
-    if (!owner) return res.status(404).json({ error: 'Account not found' });
-    if (owner.planStatus === 'active' && owner.planId) {
+    if (req.user.planStatus === 'active' && req.user.planId) {
       return res.status(400).json({ error: 'This account already has an active plan. Ask an admin to change it.' });
     }
     const plan = await Plan.findById(req.body.planId);
     if (!plan || !plan.isActive) return res.status(404).json({ error: 'Plan not found' });
-    await User.setPlan(owner._id, plan._id, 'pending');
-    const sub = await getOwnerSubscription(owner._id);
+    await User.setPlan(req.user._id, plan._id, 'pending');
+    const updated = await User.findById(req.user._id);
+    const sub = await getAccountSubscription(updated);
     res.json({
-      subscription: serializeSubscription(sub, req.user),
+      subscription: serializeSubscription(sub, updated),
       message: `Requested ${plan.name}. An admin must confirm it before messages are added.`
     });
   } catch (err) {
