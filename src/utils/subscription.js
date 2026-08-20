@@ -74,37 +74,10 @@ const serializeSubscription = (sub, user = null) => {
   };
 };
 
-const assertSourceAllowed = (sub, source) => {
-  const sourceName = normalizeMessageSource(source);
-  const enabled = sub.enabledSources || [];
-  const activePlan = sub.status === 'active' && sub.plan;
-
-  if (!activePlan && enabled.length === 0) {
-    return { ok: true, source: sourceName };
-  }
-
-  if (activePlan && enabled.length === 0) {
-    return {
-      ok: false,
-      error: 'No sources are enabled on this plan. Ask an admin to enable a source.'
-    };
-  }
-
-  if (!sourceName) {
-    if (enabled.length > 0) {
-      return { ok: false, error: 'source is required.' };
-    }
-    return { ok: true, source: null };
-  }
-
-  if (enabled.length > 0 && !enabled.includes(sourceName)) {
-    return {
-      ok: false,
-      error: `Source "${sourceName}" is not enabled on this account.`
-    };
-  }
-
-  return { ok: true, source: sourceName };
+// On/off is display-only (stats/logs). Sending OTP and other messages
+// must still work when a source is off.
+const assertSourceAllowed = (_sub, source) => {
+  return { ok: true, source: normalizeMessageSource(source) };
 };
 
 const assignPlanToOwner = async (owner, plan, { refillBalance = true } = {}) => {
