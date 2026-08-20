@@ -25,7 +25,7 @@ const resolveOwner = async (userId) => {
 
 const digitsOnly = (value) => String(value || '').replace(/\D/g, '');
 
-const createWhatsAppClientForOwner = async (req, owner, { name, phone } = {}) => {
+const createWhatsAppClientForOwner = async (req, owner, { name, phone, source } = {}) => {
   if (!owner) {
     const err = new Error('User not found');
     err.status = 404;
@@ -37,20 +37,64 @@ const createWhatsAppClientForOwner = async (req, owner, { name, phone } = {}) =>
     throw err;
   }
 
-  const clientName = String(name || '').trim();
+  const sourceName = normalizeMessageSource(source);
+  const clientName = String(name || '').trim() || sourceName;
   if (!clientName) {
     const err = new Error('Client name is required');
     err.status = 400;
     throw err;
   }
 
-  const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
   const phoneDigits = digitsOnly(phone) || null;
+
+  if (sourceName) {
+    const existingSources = await UserSource.listByUser(owner._id);
+    const already = existingSources.find((item) => item.source === sourceName);
+    if (!already?.enabled) {
+      const sub = await getOwnerSubscription(owner._id);
+      const enabledCount = existingSources.filter((item) => item.enabled).length;
+      const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : enabledCount + 1);
+      if (sub.status === 'active' && enabledCount >= limit) {
+        const err = new Error(
+          `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before assigning another.`
+        );
+        err.status = 400;
+        throw err;
+      }
+    }
+    await UserSource.upsert({ userId: owner._id, source: sourceName, enabled: true });
+
+    const existing = await WhatsAppClientModel.findOne({
+      userId: owner._id,
+      source: sourceName,
+      isActive: true
+    });
+
+    if (existing) {
+      const updates = { status: 'initializing' };
+      if (clientName && clientName !== existing.name) updates.name = clientName;
+      if (phoneDigits) updates.phone = phoneDigits;
+      const client = await WhatsAppClientModel.findByIdAndUpdate(existing._id, updates, { new: true });
+      setImmediate(() => {
+        createWhatsAppClient(client.clientId).catch((err) => {
+          console.error(`Admin init error for ${client.clientId}:`, err);
+        });
+      });
+      return {
+        client,
+        reused: true,
+        qrShare: buildQrSharePayload(req, client.clientId)
+      };
+    }
+  }
+
+  const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
   const createdClient = await WhatsAppClientModel.create({
     userId: owner._id,
     name: clientName,
     phone: phoneDigits,
     clientId,
+    source: sourceName || null,
     sessionPath: `./sessions/${clientId}`,
     status: 'disconnected'
   });
@@ -69,6 +113,7 @@ const createWhatsAppClientForOwner = async (req, owner, { name, phone } = {}) =>
 
   return {
     client,
+    reused: false,
     qrShare: buildQrSharePayload(req, client.clientId)
   };
 };
@@ -112,8 +157,14 @@ const buildCredentialsPayload = async (req, user) => {
     { sort: { createdAt: -1 } }
   );
   const apiBaseUrl = getPublicApiBase(req);
-  const primaryClient = clients.find((item) => item.status === 'connected') || clients[0] || null;
   const source = user.source || '';
+  const sourceClient = source
+    ? clients.find((item) => item.source === source)
+    : null;
+  const primaryClient = sourceClient
+    || clients.find((item) => item.status === 'connected')
+    || clients[0]
+    || null;
   const envLines = [
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
@@ -143,6 +194,7 @@ const buildCredentialsPayload = async (req, user) => {
       _id: item._id,
       name: item.name,
       clientId: item.clientId,
+      source: item.source || null,
       status: item.status,
       phone: item.phone || null
     })),
@@ -624,14 +676,17 @@ router.post('/users/:id/clients', [
 
   try {
     const owner = await resolveOwner(req.params.id);
-    const { client, qrShare } = await createWhatsAppClientForOwner(req, owner, {
+    const { client, qrShare, reused } = await createWhatsAppClientForOwner(req, owner, {
       name: req.body.name,
-      phone: req.body.phone
+      phone: req.body.phone,
+      source: req.body.source
     });
-    res.status(201).json({
+    res.status(reused ? 200 : 201).json({
       client,
       qrShare,
-      message: 'WhatsApp client created. Open Share QR and scan when the code appears.'
+      message: reused
+        ? `This number is already assigned to "${client.source}". Open Share QR and scan to reconnect.`
+        : `WhatsApp number created and assigned to "${client.source}". Open Share QR and scan.`
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -651,51 +706,32 @@ router.get('/phone-numbers', async (_req, res) => {
   }
 });
 
-// POST /api/admin/phone-numbers — create owner (optional) and add a WhatsApp number
+// POST /api/admin/phone-numbers — add a WhatsApp number and assign it to a source/client
 router.post('/phone-numbers', [
-  body('clientName').trim().notEmpty().withMessage('Phone / client name is required')
+  body('userId').trim().notEmpty().withMessage('Main service is required'),
+  body('source').trim().notEmpty().withMessage('Source / client is required')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    let owner = null;
-    let createdUser = false;
+    const owner = await resolveOwner(req.body.userId);
+    if (!owner) return res.status(404).json({ error: 'User not found' });
 
-    if (req.body.userId) {
-      owner = await resolveOwner(req.body.userId);
-      if (!owner) return res.status(404).json({ error: 'User not found' });
-    } else {
-      const name = String(req.body.name || '').trim();
-      const email = String(req.body.email || '').trim().toLowerCase();
-      const password = String(req.body.password || '');
-      if (!name) return res.status(400).json({ error: 'User name is required' });
-      if (!email) return res.status(400).json({ error: 'User email is required' });
-      if (password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
-      }
-
-      const existing = await User.findOne({ email });
-      if (existing) return res.status(400).json({ error: 'Email already registered' });
-
-      owner = await User.create({ name, email, password, role: 'user' });
-      await issueAccountToken(owner);
-      createdUser = true;
-    }
-
-    const { client, qrShare } = await createWhatsAppClientForOwner(req, owner, {
-      name: req.body.clientName,
-      phone: req.body.phone
+    const sourceName = normalizeMessageSource(req.body.source);
+    const { client, qrShare, reused } = await createWhatsAppClientForOwner(req, owner, {
+      name: req.body.clientName || sourceName,
+      phone: req.body.phone,
+      source: sourceName
     });
 
-    res.status(201).json({
-      createdUser,
+    res.status(reused ? 200 : 201).json({
       user: owner.toJSON(),
       client,
       qrShare,
-      message: createdUser
-        ? 'User created and phone number added. Open Share QR and scan when the code appears.'
-        : 'Phone number added. Open Share QR and scan when the code appears.'
+      message: reused
+        ? `Number already assigned to "${client.source}". Scan the QR to connect it.`
+        : `Number assigned to "${client.source}". Scan the QR to connect it.`
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

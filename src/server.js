@@ -230,6 +230,7 @@ testConnection()
     await MessageJob.ensureTables();
     await MessageLog.ensureSourceColumn();
     await Campaign.ensureSourceColumn();
+    await WhatsAppClientModel.ensureSourceColumn();
     console.log('✅ MySQL connected');
 
     server.listen(process.env.PORT || 5000, () => {
