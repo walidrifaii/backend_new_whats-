@@ -31,10 +31,10 @@ const buildOtpMessage = (code) => {
     .replace(/\{minutes\}/g, String(getOtpExpiresMinutes()));
 };
 
-const resolveOtpClient = async (clientIdParam, userId = null, source = null) => {
-  const requestedId = String(clientIdParam || '').trim();
-  const envDefault = String(
-    process.env.OTP_DEFAULT_CLIENT_ID ||
+const resolveOtpClient = async (clientIdParam, userId = null) => {
+  const explicit = String(
+    clientIdParam ||
+      process.env.OTP_DEFAULT_CLIENT_ID ||
       process.env.WHATSAPP_NODE_CLIENT_ID ||
       ''
   ).trim();
@@ -44,48 +44,22 @@ const resolveOtpClient = async (clientIdParam, userId = null, source = null) => 
     return String(client.userId) === String(userId);
   };
 
-  const findByIdOrSession = async (id) => {
-    if (!id) return null;
+  if (explicit) {
     const bySession = await WhatsAppClientModel.findOne({
-      clientId: id,
+      clientId: explicit,
       isActive: true,
       status: 'connected'
     });
     if (bySession && belongsToUser(bySession)) return bySession;
 
     const byDbId = await WhatsAppClientModel.findOne({
-      _id: id,
+      _id: explicit,
       isActive: true,
       status: 'connected'
     });
     if (byDbId && belongsToUser(byDbId)) return byDbId;
     return null;
-  };
-
-  if (requestedId) {
-    return findByIdOrSession(requestedId);
   }
-
-  const sourceName = String(source || '').trim();
-  if (sourceName && userId) {
-    const bySourceConnected = await WhatsAppClientModel.findOne({
-      userId,
-      source: sourceName,
-      isActive: true,
-      status: 'connected'
-    });
-    if (bySourceConnected) return bySourceConnected;
-
-    const bySource = await WhatsAppClientModel.findOne({
-      userId,
-      source: sourceName,
-      isActive: true
-    });
-    if (bySource) return bySource;
-  }
-
-  const fromEnv = await findByIdOrSession(envDefault);
-  if (fromEnv) return fromEnv;
 
   const filter = { isActive: true, status: 'connected' };
   if (userId) filter.userId = userId;
@@ -142,23 +116,13 @@ router.post(
       const phone = normalizePhone(req.body.phone).replace('@c.us', '');
       const ownerUserId = getOwnerUserId(req.user);
       const source = getLockedSource(req.user) || resolveMessageSource(req);
-      const dbClient = await resolveOtpClient(req.body.clientId, ownerUserId, source);
+      const dbClient = await resolveOtpClient(req.body.clientId, ownerUserId);
 
       if (!dbClient) {
         return res.status(503).json({
           ok: false,
-          error: source
-            ? `No WhatsApp number is assigned to source "${source}". Add and scan a number for this client in admin.`
-            : 'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
-        });
-      }
-
-      if (dbClient.status !== 'connected') {
-        return res.status(503).json({
-          ok: false,
-          error: source
-            ? `The number assigned to "${source}" is not connected. Scan the QR for this client.`
-            : 'WhatsApp client is not connected. Scan the QR and try again.'
+          error:
+            'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
         });
       }
 

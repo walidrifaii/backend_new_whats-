@@ -23,101 +23,6 @@ const resolveOwner = async (userId) => {
   return user;
 };
 
-const digitsOnly = (value) => String(value || '').replace(/\D/g, '');
-
-const createWhatsAppClientForOwner = async (req, owner, { name, phone, source } = {}) => {
-  if (!owner) {
-    const err = new Error('User not found');
-    err.status = 404;
-    throw err;
-  }
-  if (owner.role === 'admin') {
-    const err = new Error('Cannot create a WhatsApp client on an admin login.');
-    err.status = 400;
-    throw err;
-  }
-
-  const sourceName = normalizeMessageSource(source);
-  const clientName = String(name || '').trim() || sourceName;
-  if (!clientName) {
-    const err = new Error('Client name is required');
-    err.status = 400;
-    throw err;
-  }
-
-  const phoneDigits = digitsOnly(phone) || null;
-
-  if (sourceName) {
-    const existingSources = await UserSource.listByUser(owner._id);
-    const already = existingSources.find((item) => item.source === sourceName);
-    if (!already?.enabled) {
-      const sub = await getOwnerSubscription(owner._id);
-      const enabledCount = existingSources.filter((item) => item.enabled).length;
-      const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : enabledCount + 1);
-      if (sub.status === 'active' && enabledCount >= limit) {
-        const err = new Error(
-          `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before assigning another.`
-        );
-        err.status = 400;
-        throw err;
-      }
-    }
-    await UserSource.upsert({ userId: owner._id, source: sourceName, enabled: true });
-
-    const existing = await WhatsAppClientModel.findOne({
-      userId: owner._id,
-      source: sourceName,
-      isActive: true
-    });
-
-    if (existing) {
-      const updates = { status: 'initializing' };
-      if (clientName && clientName !== existing.name) updates.name = clientName;
-      if (phoneDigits) updates.phone = phoneDigits;
-      const client = await WhatsAppClientModel.findByIdAndUpdate(existing._id, updates, { new: true });
-      setImmediate(() => {
-        createWhatsAppClient(client.clientId).catch((err) => {
-          console.error(`Admin init error for ${client.clientId}:`, err);
-        });
-      });
-      return {
-        client,
-        reused: true,
-        qrShare: buildQrSharePayload(req, client.clientId)
-      };
-    }
-  }
-
-  const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-  const createdClient = await WhatsAppClientModel.create({
-    userId: owner._id,
-    name: clientName,
-    phone: phoneDigits,
-    clientId,
-    source: sourceName || null,
-    sessionPath: `./sessions/${clientId}`,
-    status: 'disconnected'
-  });
-
-  const client = await WhatsAppClientModel.findByIdAndUpdate(
-    createdClient._id,
-    { status: 'initializing' },
-    { new: true }
-  );
-
-  setImmediate(() => {
-    createWhatsAppClient(client.clientId).catch((err) => {
-      console.error(`Admin init error for ${client.clientId}:`, err);
-    });
-  });
-
-  return {
-    client,
-    reused: false,
-    qrShare: buildQrSharePayload(req, client.clientId)
-  };
-};
-
 const getPublicApiBase = (req) => {
   const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
   const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
@@ -157,14 +62,8 @@ const buildCredentialsPayload = async (req, user) => {
     { sort: { createdAt: -1 } }
   );
   const apiBaseUrl = getPublicApiBase(req);
+  const primaryClient = clients.find((item) => item.status === 'connected') || clients[0] || null;
   const source = user.source || '';
-  const sourceClient = source
-    ? clients.find((item) => item.source === source)
-    : null;
-  const primaryClient = sourceClient
-    || clients.find((item) => item.status === 'connected')
-    || clients[0]
-    || null;
   const envLines = [
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
@@ -194,7 +93,6 @@ const buildCredentialsPayload = async (req, user) => {
       _id: item._id,
       name: item.name,
       clientId: item.clientId,
-      source: item.source || null,
       status: item.status,
       phone: item.phone || null
     })),
@@ -542,66 +440,6 @@ router.patch('/users/:id/sources', async (req, res) => {
   }
 });
 
-// POST /api/admin/users/:id/sources — add one source to a main service (owner)
-router.post('/users/:id/sources', [
-  body('source').trim().notEmpty().withMessage('Source name is required')
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    const ownerId = user.parentUserId || user._id;
-    const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
-    if (!owner) return res.status(404).json({ error: 'Main service not found' });
-    if (owner.role === 'admin') {
-      return res.status(400).json({ error: 'Cannot assign a source to an admin login.' });
-    }
-
-    const sourceName = normalizeMessageSource(req.body.source);
-    if (!sourceName) {
-      return res.status(400).json({ error: 'Source must be letters, numbers, dot, dash, or underscore' });
-    }
-
-    const sub = await getOwnerSubscription(ownerId);
-    const existing = await UserSource.listByUser(ownerId);
-    const enabled = existing.filter((item) => item.enabled).map((item) => item.source);
-    const already = existing.find((item) => item.source === sourceName);
-
-    if (already?.enabled) {
-      return res.json({
-        sources: existing,
-        enabledSources: enabled,
-        source: sourceName,
-        message: `"${sourceName}" is already assigned to ${owner.name}`
-      });
-    }
-
-    const nextEnabled = [...new Set([...enabled, sourceName])];
-    const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : nextEnabled.length);
-    if (sub.status === 'active' && nextEnabled.length > limit) {
-      return res.status(400).json({
-        error: `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before adding another.`
-      });
-    }
-
-    await UserSource.upsert({ userId: ownerId, source: sourceName, enabled: true });
-    const sources = await UserSource.listByUser(ownerId);
-    const next = await getOwnerSubscription(ownerId);
-    res.status(already ? 200 : 201).json({
-      sources,
-      enabledSources: next.enabledSources,
-      subscription: serializeSubscription(next, owner),
-      source: sourceName,
-      ownerId: owner._id,
-      message: `"${sourceName}" assigned to ${owner.name}`
-    });
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
 // PATCH /api/admin/users/:id/source-lock
 // null source = this email can switch among the owner's enabled sources
 router.patch('/users/:id/source-lock', async (req, res) => {
@@ -676,65 +514,41 @@ router.post('/users/:id/clients', [
 
   try {
     const owner = await resolveOwner(req.params.id);
-    const { client, qrShare, reused } = await createWhatsAppClientForOwner(req, owner, {
-      name: req.body.name,
-      phone: req.body.phone,
-      source: req.body.source
-    });
-    res.status(reused ? 200 : 201).json({
-      client,
-      qrShare,
-      message: reused
-        ? `This number is already assigned to "${client.source}". Open Share QR and scan to reconnect.`
-        : `WhatsApp number created and assigned to "${client.source}". Open Share QR and scan.`
-    });
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
+    if (!owner) return res.status(404).json({ error: 'User not found' });
+    if (owner.role === 'admin') {
+      return res.status(400).json({ error: 'Cannot create a WhatsApp client on an admin login.' });
+    }
 
-// GET /api/admin/phone-numbers — all WhatsApp clients with owner
-router.get('/phone-numbers', async (_req, res) => {
-  try {
-    const clients = await WhatsAppClientModel.findAllWithOwners({ isActive: true });
-    res.json({
-      count: clients.length,
-      clients
+    const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+    const createdClient = await WhatsAppClientModel.create({
+      userId: owner._id,
+      name: req.body.name,
+      clientId,
+      sessionPath: `./sessions/${clientId}`,
+      status: 'disconnected'
     });
+
+    const client = await WhatsAppClientModel.findByIdAndUpdate(
+      createdClient._id,
+      { status: 'initializing' },
+      { new: true }
+    );
+
+    res.status(201).json({
+      client,
+      qrShare: buildQrSharePayload(req, client.clientId),
+      message: 'WhatsApp client created. Open Share QR and scan when the code appears.'
+    });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(client.clientId);
+      } catch (err) {
+        console.error(`Admin init error for ${client.clientId}:`, err);
+      }
+    })();
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/admin/phone-numbers — add a WhatsApp number and assign it to a source/client
-router.post('/phone-numbers', [
-  body('userId').trim().notEmpty().withMessage('Main service is required'),
-  body('source').trim().notEmpty().withMessage('Source / client is required')
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  try {
-    const owner = await resolveOwner(req.body.userId);
-    if (!owner) return res.status(404).json({ error: 'User not found' });
-
-    const sourceName = normalizeMessageSource(req.body.source);
-    const { client, qrShare, reused } = await createWhatsAppClientForOwner(req, owner, {
-      name: req.body.clientName || sourceName,
-      phone: req.body.phone,
-      source: sourceName
-    });
-
-    res.status(reused ? 200 : 201).json({
-      user: owner.toJSON(),
-      client,
-      qrShare,
-      message: reused
-        ? `Number already assigned to "${client.source}". Scan the QR to connect it.`
-        : `Number assigned to "${client.source}". Scan the QR to connect it.`
-    });
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

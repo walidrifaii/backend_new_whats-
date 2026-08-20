@@ -9,7 +9,6 @@ const mapRow = (row) => {
     name: row.name,
     phone: row.phone,
     clientId: row.client_id,
-    source: row.source || null,
     status: row.status,
     qrCode: row.qr_code,
     sessionPath: row.session_path,
@@ -45,14 +44,6 @@ const buildFilter = (filter = {}) => {
     clauses.push('phone = ?');
     values.push(String(filter.phone));
   }
-  if (filter.source !== undefined) {
-    if (filter.source === null || filter.source === '') {
-      clauses.push('(source IS NULL OR source = \'\')');
-    } else {
-      clauses.push('source = ?');
-      values.push(String(filter.source));
-    }
-  }
   // Support both a plain string  { status: 'connected' }
   // and a $in array              { status: { $in: ['connected', 'qr_ready'] } }
   if (filter.status !== undefined) {
@@ -78,7 +69,6 @@ const buildUpdate = (update = {}) => {
     name: 'name',
     phone: 'phone',
     clientId: 'client_id',
-    source: 'source',
     status: 'status',
     qrCode: 'qr_code',
     sessionPath: 'session_path',
@@ -109,27 +99,10 @@ const buildUpdate = (update = {}) => {
 };
 
 class WhatsAppClientModel {
-  static async ensureSourceColumn() {
-    try {
-      await query(`ALTER TABLE whatsapp_clients ADD COLUMN source VARCHAR(64) NULL AFTER client_id`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
-    try {
-      await query(`ALTER TABLE whatsapp_clients ADD INDEX idx_whatsapp_clients_user_source (user_id, source)`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
-        throw err;
-      }
-    }
-  }
-
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, user_id, name, phone, client_id, source, status, qr_code, session_path,
+      SELECT id, user_id, name, phone, client_id, status, qr_code, session_path,
              last_connected, messages_sent, is_active, created_at, updated_at
       FROM whatsapp_clients
     `;
@@ -150,28 +123,6 @@ class WhatsAppClientModel {
     return rows.map(mapRow);
   }
 
-  static async findAllWithOwners({ isActive = true } = {}) {
-    const rows = await query(
-      `SELECT
-         c.id, c.user_id, c.name, c.phone, c.client_id, c.source, c.status, c.qr_code,
-         c.session_path, c.last_connected, c.messages_sent, c.is_active,
-         c.created_at, c.updated_at,
-         u.name AS owner_name, u.email AS owner_email, u.role AS owner_role
-       FROM whatsapp_clients c
-       LEFT JOIN users u ON u.id = c.user_id
-       WHERE c.is_active = ?
-       ORDER BY c.created_at DESC`,
-      [isActive ? 1 : 0]
-    );
-
-    return rows.map((row) => ({
-      ...mapRow(row),
-      ownerName: row.owner_name || '',
-      ownerEmail: row.owner_email || '',
-      ownerRole: row.owner_role || ''
-    }));
-  }
-
   static async findOne(filter = {}) {
     const rows = await this.find(filter, { limit: 1, sort: { createdAt: -1 } });
     return rows[0] || null;
@@ -186,16 +137,15 @@ class WhatsAppClientModel {
 
     await query(
       `INSERT INTO whatsapp_clients (
-        id, user_id, name, phone, client_id, source, status, qr_code, session_path,
+        id, user_id, name, phone, client_id, status, qr_code, session_path,
         last_connected, messages_sent, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
         userId,
         String(data.name || '').trim(),
         data.phone || null,
         String(data.clientId || '').trim(),
-        data.source || null,
         data.status || 'disconnected',
         data.qrCode || null,
         data.sessionPath || null,
