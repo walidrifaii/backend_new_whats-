@@ -3,6 +3,7 @@ const router = express.Router();
 const MessageLog = require('../models/MessageLog');
 const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, applySourceScope } = require('../utils/accountScope');
+const { getOwnerSubscription } = require('../utils/subscription');
 
 // GET /api/logs - get all logs for user
 router.get('/', authMiddleware, async (req, res) => {
@@ -11,7 +12,8 @@ router.get('/', authMiddleware, async (req, res) => {
     const pageNumber = parseInt(page, 10) || 1;
     const limitNumber = parseInt(limit, 10) || 50;
     const filter = { userId: getOwnerUserId(req.user) };
-    applySourceScope(filter, req.user, source);
+    const sub = await getOwnerSubscription(req.user);
+    applySourceScope(filter, req.user, source, sub.enabledSources);
 
     if (campaignId) filter.campaignId = campaignId;
     if (clientId) filter.clientId = clientId;
@@ -38,16 +40,17 @@ router.get('/stats', authMiddleware, async (req, res) => {
     const filter = { userId: getOwnerUserId(req.user) };
     if (clientId) filter.clientId = clientId;
     if (campaignId) filter.campaignId = campaignId;
-    applySourceScope(filter, req.user, source);
+    const sub = await getOwnerSubscription(req.user);
+    applySourceScope(filter, req.user, source, sub.enabledSources);
 
     const stats = await MessageLog.getStats(filter);
     const bySource = await MessageLog.getStatsBySource({
-      userId: getOwnerUserId(req.user),
-      ...(filter.source ? { source: filter.source } : {})
+      userId: getOwnerUserId(req.user)
     });
     res.json({
       stats: stats || { total: 0, sent: 0, failed: 0, received: 0, outgoing: 0, incoming: 0 },
-      bySource
+      bySource,
+      enabledSources: sub.enabledSources || []
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

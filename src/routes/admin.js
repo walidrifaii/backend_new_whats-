@@ -2,9 +2,13 @@ const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
+const Plan = require('../models/Plan');
+const UserSource = require('../models/UserSource');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
+const { SOURCE_CATALOG, getOwnerSubscription, serializeSubscription, assignPlanToOwner } = require('../utils/subscription');
+const { normalizeMessageSource } = require('../utils/messageSource');
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -83,7 +87,24 @@ router.get('/users', async (req, res) => {
       return safe;
     });
 
-    res.json({ users: result });
+    const ownerIds = result.filter((u) => !u.parentUserId && u.role !== 'admin').map((u) => u._id);
+    const plans = await Plan.findAll();
+    const plansById = new Map(plans.map((p) => [p._id, p]));
+    const sourcesByOwner = {};
+    for (const ownerId of ownerIds) {
+      sourcesByOwner[ownerId] = await UserSource.listByUser(ownerId);
+    }
+    for (const row of result) {
+      const ownerId = row.parentUserId || row._id;
+      const plan = plansById.get(row.planId);
+      row.plan = plan || null;
+      row.enabledSources = (sourcesByOwner[ownerId] || [])
+        .filter((item) => item.enabled)
+        .map((item) => item.source);
+      row.sourceCatalog = SOURCE_CATALOG;
+    }
+
+    res.json({ users: result, plans });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -185,6 +206,125 @@ router.post('/users/:id/service-accounts', [
     res.status(201).json({
       user: user.toJSON(),
       message: `Service login created for source "${user.source}". They share this owner's WhatsApp.`
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/plans
+router.get('/plans', async (_req, res) => {
+  try {
+    const plans = await Plan.findAll();
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/plans
+router.post('/plans', [
+  body('name').trim().notEmpty().withMessage('Plan name is required'),
+  body('messageQuota').isInt({ min: 1 }).withMessage('Message quota must be at least 1'),
+  body('sourceLimit').isInt({ min: 1, max: 10 }).withMessage('Source limit must be 1-10')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const plan = await Plan.create({
+      name: req.body.name,
+      slug: req.body.slug,
+      messageQuota: req.body.messageQuota,
+      sourceLimit: req.body.sourceLimit,
+      isActive: req.body.isActive,
+      sortOrder: req.body.sortOrder
+    });
+    res.status(201).json({ plan });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/plans/:id
+router.patch('/plans/:id', async (req, res) => {
+  try {
+    const existing = await Plan.findById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Plan not found' });
+    const plan = await Plan.update(req.params.id, {
+      name: req.body.name,
+      slug: req.body.slug,
+      messageQuota: req.body.messageQuota,
+      sourceLimit: req.body.sourceLimit,
+      isActive: req.body.isActive,
+      sortOrder: req.body.sortOrder
+    });
+    res.json({ plan });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/users/:id/plan — assign or clear a plan
+router.patch('/users/:id/plan', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.parentUserId) {
+      return res.status(400).json({ error: 'Assign the plan on the WhatsApp owner account, not the service login.' });
+    }
+
+    const planId = req.body.planId ? String(req.body.planId) : '';
+    if (!planId) {
+      await User.setPlan(user._id, null, 'none');
+      const sub = await getOwnerSubscription(user._id);
+      return res.json({
+        user: (await User.findById(user._id)).toJSON(),
+        subscription: serializeSubscription(sub, user),
+        message: 'Plan removed'
+      });
+    }
+
+    const plan = await Plan.findById(planId);
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+    const refillBalance = req.body.refillBalance !== false;
+    const sub = await assignPlanToOwner(user, plan, { refillBalance });
+    const updated = await User.findById(user._id);
+    res.json({
+      user: updated.toJSON(),
+      subscription: serializeSubscription(sub, updated),
+      message: `Assigned ${plan.name} (${plan.messageQuota} messages, ${plan.sourceLimit} sources)`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/users/:id/sources — enable sources up to the plan limit
+router.patch('/users/:id/sources', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ownerId = user.parentUserId || user._id;
+    const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
+    const sub = await getOwnerSubscription(ownerId);
+    const wanted = (Array.isArray(req.body.sources) ? req.body.sources : [])
+      .map((item) => normalizeMessageSource(item))
+      .filter(Boolean);
+
+    const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : wanted.length);
+    if (sub.status === 'active' && wanted.length > limit) {
+      return res.status(400).json({
+        error: `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before enabling another.`
+      });
+    }
+
+    const sources = await UserSource.setEnabledSources(ownerId, wanted);
+    const next = await getOwnerSubscription(ownerId);
+    res.json({
+      sources,
+      enabledSources: next.enabledSources,
+      subscription: serializeSubscription(next, owner),
+      message: 'Sources updated'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

@@ -17,6 +17,8 @@ const adminRoutes    = require('./routes/admin');
 
 const TokenSession        = require('./models/TokenSession');
 const User                = require('./models/User');
+const Plan                = require('./models/Plan');
+const UserSource          = require('./models/UserSource');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const Campaign            = require('./models/Campaign');
 const MessageLog          = require('./models/MessageLog');
@@ -223,6 +225,8 @@ testConnection()
     if (!ok) throw new Error('MySQL ping failed');
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
+    await Plan.ensureTable();
+    await UserSource.ensureTable();
     await MessageJob.ensureTables();
     await MessageLog.ensureSourceColumn();
     await Campaign.ensureSourceColumn();

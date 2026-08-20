@@ -12,6 +12,7 @@ const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
 const { resolveBilledUser } = require('../utils/messageBilling');
+const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
@@ -135,6 +136,13 @@ const processCampaign = async (campaignId) => {
     ownerUserId: dbClient.userId,
     source: campaign.source
   });
+  const sub = await getOwnerSubscription(dbClient.userId);
+  const sourceCheck = assertSourceAllowed(sub, campaign.source);
+  if (!sourceCheck.ok) {
+    await failPendingContacts(campaignId, sourceCheck.error);
+    campaignQueues.delete(campaignId.toString());
+    return;
+  }
   const skipBalance = shouldSkipBalanceForCampaign(campaign, billedUser);
   const notifyUser = billedUser || campaignOwner;
 

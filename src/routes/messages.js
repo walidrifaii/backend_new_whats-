@@ -20,6 +20,7 @@ const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
 const { resolveMessageSource } = require('../utils/messageSource');
 const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
+const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
 
@@ -152,6 +153,11 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     }
 
     const source = getLockedSource(req.user) || resolveMessageSource(req);
+    const sub = await getOwnerSubscription(req.user);
+    const sourceCheck = assertSourceAllowed(sub, source);
+    if (!sourceCheck.ok) {
+      return res.status(403).json({ error: sourceCheck.error });
+    }
     const billedUser = await resolveBilledUser({
       user: req.user,
       ownerUserId: getOwnerUserId(req.user),
@@ -322,6 +328,11 @@ router.post('/send', authMiddleware, async (req, res) => {
     }
 
     const source = getLockedSource(req.user) || resolveMessageSource(req);
+    const sub = await getOwnerSubscription(req.user);
+    const sourceCheck = assertSourceAllowed(sub, source);
+    if (!sourceCheck.ok) {
+      return res.status(403).json({ error: sourceCheck.error });
+    }
     const billedUser = await resolveBilledUser({
       user: req.user,
       ownerUserId: getOwnerUserId(req.user),

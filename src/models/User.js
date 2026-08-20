@@ -16,6 +16,8 @@ const mapRowToUser = (row) => {
     messageBalance: row.message_balance ?? 0,
     parentUserId: row.parent_user_id || null,
     source: row.source || null,
+    planId: row.plan_id || null,
+    planStatus: row.plan_status || 'none',
     isServiceAccount: Boolean(row.parent_user_id),
     createdAt: row.created_at,
     async comparePassword(password) {
@@ -33,7 +35,7 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
-  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, created_at';
+  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, plan_id, plan_status, created_at';
 
   static async ensureAuthTokenColumn() {
     try {
@@ -58,6 +60,7 @@ class UserModel {
       }
     }
     await this.ensureServiceAccountColumns();
+    await this.ensurePlanColumns();
   }
 
   static async ensureServiceAccountColumns() {
@@ -89,6 +92,31 @@ class UserModel {
         throw err;
       }
     }
+  }
+
+  static async ensurePlanColumns() {
+    try {
+      await query(`ALTER TABLE users ADD COLUMN plan_id CHAR(24) NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE users ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'none'`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+  }
+
+  static async setPlan(userId, planId, status = 'active') {
+    await query(
+      `UPDATE users SET plan_id = ?, plan_status = ? WHERE id = ?`,
+      [planId ? String(planId) : null, String(status || 'none'), String(userId)]
+    );
+    return this.findById(userId);
   }
 
   static async findOne(filter = {}) {
@@ -198,6 +226,23 @@ class UserModel {
       const err = new Error(`This account already has a login for source "${sourceName}"`);
       err.status = 400;
       throw err;
+    }
+
+    const { getOwnerSubscription } = require('../utils/subscription');
+    const UserSource = require('./UserSource');
+    const sub = await getOwnerSubscription(parent._id);
+    if (sub.status === 'active' && sub.plan) {
+      const alreadyEnabled = sub.enabledSources.includes(sourceName);
+      if (!alreadyEnabled && sub.enabledSources.length >= sub.plan.sourceLimit) {
+        const err = new Error(
+          `This ${sub.plan.name} plan allows ${sub.plan.sourceLimit} source(s). Enable a source in admin or upgrade the plan.`
+        );
+        err.status = 400;
+        throw err;
+      }
+      if (!alreadyEnabled) {
+        await UserSource.upsert({ userId: parent._id, source: sourceName, enabled: true });
+      }
     }
 
     return this.create({

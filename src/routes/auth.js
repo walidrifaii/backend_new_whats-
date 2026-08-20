@@ -6,7 +6,9 @@ const User = require('../models/User');
 const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
-const { isServiceAccount } = require('../utils/accountScope');
+const { isServiceAccount, getOwnerUserId } = require('../utils/accountScope');
+const Plan = require('../models/Plan');
+const { getOwnerSubscription, serializeSubscription } = require('../utils/subscription');
 
 const getTokenExpiryDate = (token) => {
   const decoded = jwt.decode(token);
@@ -129,7 +131,16 @@ router.post('/stats-login', [
     }
 
     const token = await issueUserSession(user);
-    return res.json({ token, user: user.toJSON() });
+    const sub = await getOwnerSubscription(user);
+    const remaining = sub.status === 'active' ? sub.remaining : user.messageBalance;
+    return res.json({
+      token,
+      user: {
+        ...user.toJSON(),
+        messageBalance: remaining,
+        subscription: serializeSubscription(sub, user)
+      }
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -174,7 +185,65 @@ router.post('/admin-login', [
 
 // GET /api/auth/me
 router.get('/me', authMiddleware, async (req, res) => {
-  res.json({ user: req.user });
+  try {
+    const sub = await getOwnerSubscription(req.user);
+    const remaining = sub.status === 'active' ? sub.remaining : (req.user.messageBalance ?? 0);
+    res.json({
+      user: {
+        ...req.user,
+        messageBalance: remaining,
+        subscription: serializeSubscription(sub, req.user)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/plans — active plans a client can request
+router.get('/plans', authMiddleware, async (_req, res) => {
+  try {
+    const plans = await Plan.findAll({ activeOnly: true });
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/subscription
+router.get('/subscription', authMiddleware, async (req, res) => {
+  try {
+    const sub = await getOwnerSubscription(req.user);
+    res.json({ subscription: serializeSubscription(sub, req.user), remaining: sub.remaining });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/subscription/request — client picks a plan; admin still confirms
+router.post('/subscription/request', authMiddleware, [
+  body('planId').trim().notEmpty().withMessage('planId is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const ownerId = getOwnerUserId(req.user);
+    const owner = await User.findById(ownerId);
+    if (!owner) return res.status(404).json({ error: 'Account not found' });
+    if (owner.planStatus === 'active' && owner.planId) {
+      return res.status(400).json({ error: 'This account already has an active plan. Ask an admin to change it.' });
+    }
+    const plan = await Plan.findById(req.body.planId);
+    if (!plan || !plan.isActive) return res.status(404).json({ error: 'Plan not found' });
+    await User.setPlan(owner._id, plan._id, 'pending');
+    const sub = await getOwnerSubscription(owner._id);
+    res.json({
+      subscription: serializeSubscription(sub, req.user),
+      message: `Requested ${plan.name}. An admin must confirm it before messages are added.`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/auth/logout

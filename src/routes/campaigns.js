@@ -37,10 +37,10 @@ const resolveWhatsAppClient = async (clientIdParam, userId) => {
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const campaigns = await Campaign.find(
-      { userId: req.user._id },
+      { userId: getOwnerUserId(req.user) },
       { sort: { createdAt: -1 } }
     );
-    const clients = await WhatsAppClientModel.find({ userId: req.user._id, isActive: true });
+    const clients = await WhatsAppClientModel.find({ userId: getOwnerUserId(req.user), isActive: true });
     const clientsById = new Map(clients.map((c) => [c._id, c]));
     const hydratedCampaigns = campaigns.map((campaign) => ({
       ...campaign,
@@ -93,7 +93,7 @@ router.post('/', authMiddleware, [
 // PATCH /api/campaigns/:id — update draft/paused campaign (e.g. save image URL after upload)
 router.patch('/:id', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: getOwnerUserId(req.user) });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     if (!['draft', 'paused'].includes(campaign.status)) {
       return res.status(400).json({ error: 'Can only edit draft or paused campaigns' });
@@ -124,7 +124,7 @@ router.patch('/:id', authMiddleware, async (req, res) => {
     const updated = await Campaign.findByIdAndUpdate(campaign._id, update, { new: true });
     const client = await WhatsAppClientModel.findOne({
       _id: updated.clientId,
-      userId: req.user._id
+      userId: getOwnerUserId(req.user)
     });
     res.json({ campaign: { ...updated, clientId: client || updated.clientId } });
   } catch (err) {
@@ -135,9 +135,9 @@ router.patch('/:id', authMiddleware, async (req, res) => {
 // GET /api/campaigns/:id
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: getOwnerUserId(req.user) });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: req.user._id });
+    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: getOwnerUserId(req.user) });
     res.json({ campaign: { ...campaign, clientId: client || campaign.clientId } });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -147,9 +147,9 @@ router.get('/:id', authMiddleware, async (req, res) => {
 // POST /api/campaigns/:id/start
 router.post('/:id/start', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: getOwnerUserId(req.user) });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: req.user._id });
+    const client = await WhatsAppClientModel.findOne({ _id: campaign.clientId, userId: getOwnerUserId(req.user) });
     if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
 
     if (!['draft', 'paused'].includes(campaign.status)) {
@@ -258,7 +258,7 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
 // POST /api/campaigns/:id/pause
 router.post('/:id/pause', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id });
+    const campaign = await Campaign.findOne({ _id: req.params.id, userId: getOwnerUserId(req.user) });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     if (campaign.status !== 'running') {
@@ -275,7 +275,7 @@ router.post('/:id/pause', authMiddleware, async (req, res) => {
 // DELETE /api/campaigns/:id
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
-    const campaign = await Campaign.findOneAndDelete({ _id: req.params.id, userId: req.user._id });
+    const campaign = await Campaign.findOneAndDelete({ _id: req.params.id, userId: getOwnerUserId(req.user) });
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ message: 'Campaign deleted' });
   } catch (err) {

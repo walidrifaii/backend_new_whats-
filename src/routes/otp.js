@@ -12,6 +12,7 @@ const { normalizePhone } = require('../utils/helpers');
 const { resolveMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource, applySourceScope } = require('../utils/accountScope');
 const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
+const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 const otpAuthMiddleware = require('../middleware/otpAuth');
 const authMiddleware = require('../middleware/auth');
 
@@ -123,6 +124,12 @@ router.post(
           error:
             'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
         });
+      }
+
+      const sub = await getOwnerSubscription(dbClient.userId);
+      const sourceCheck = assertSourceAllowed(sub, source);
+      if (!sourceCheck.ok) {
+        return res.status(403).json({ ok: false, error: sourceCheck.error, source });
       }
 
       let billedUser = await resolveBilledUser({

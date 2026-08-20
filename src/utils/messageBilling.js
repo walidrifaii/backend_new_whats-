@@ -3,15 +3,24 @@ const { normalizeMessageSource } = require('./messageSource');
 
 /**
  * Who pays for a send:
- * 1. Logged-in service account (ehkini/solv) → that account
- * 2. Else source + owner WhatsApp account → matching child login
- * 3. Else the logged-in owner
+ * 1. Owner with an active plan → owner (shared plan quota)
+ * 2. Logged-in service account (ehkini/solv) → that account
+ * 3. Else source + owner WhatsApp account → matching child login
+ * 4. Else the logged-in owner
  */
 const resolveBilledUser = async ({ user = null, ownerUserId = null, source = null } = {}) => {
+  const parentId = ownerUserId || (user?.parentUserId ? user.parentUserId : (user && !user.parentUserId ? user._id : null));
+  const owner = parentId
+    ? (user && !user.parentUserId && String(user._id) === String(parentId) ? user : await User.findById(parentId))
+    : null;
+
+  if (owner?.planStatus === 'active' && owner.planId) {
+    return owner;
+  }
+
   if (user?.parentUserId) return user;
 
   const sourceName = normalizeMessageSource(source);
-  const parentId = ownerUserId || (user && !user.parentUserId ? user._id : null);
 
   if (sourceName && parentId) {
     const serviceUser = await User.findOne({
@@ -22,7 +31,8 @@ const resolveBilledUser = async ({ user = null, ownerUserId = null, source = nul
     if (serviceUser) return serviceUser;
   }
 
-  return user || null;
+  if (user) return user;
+  return owner || null;
 };
 
 const requireMessageBalance = async (billedUser, required = 1) => {
