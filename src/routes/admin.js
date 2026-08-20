@@ -23,6 +23,56 @@ const resolveOwner = async (userId) => {
   return user;
 };
 
+const digitsOnly = (value) => String(value || '').replace(/\D/g, '');
+
+const createWhatsAppClientForOwner = async (req, owner, { name, phone } = {}) => {
+  if (!owner) {
+    const err = new Error('User not found');
+    err.status = 404;
+    throw err;
+  }
+  if (owner.role === 'admin') {
+    const err = new Error('Cannot create a WhatsApp client on an admin login.');
+    err.status = 400;
+    throw err;
+  }
+
+  const clientName = String(name || '').trim();
+  if (!clientName) {
+    const err = new Error('Client name is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+  const phoneDigits = digitsOnly(phone) || null;
+  const createdClient = await WhatsAppClientModel.create({
+    userId: owner._id,
+    name: clientName,
+    phone: phoneDigits,
+    clientId,
+    sessionPath: `./sessions/${clientId}`,
+    status: 'disconnected'
+  });
+
+  const client = await WhatsAppClientModel.findByIdAndUpdate(
+    createdClient._id,
+    { status: 'initializing' },
+    { new: true }
+  );
+
+  setImmediate(() => {
+    createWhatsAppClient(client.clientId).catch((err) => {
+      console.error(`Admin init error for ${client.clientId}:`, err);
+    });
+  });
+
+  return {
+    client,
+    qrShare: buildQrSharePayload(req, client.clientId)
+  };
+};
+
 const getPublicApiBase = (req) => {
   const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
   const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
@@ -514,41 +564,81 @@ router.post('/users/:id/clients', [
 
   try {
     const owner = await resolveOwner(req.params.id);
-    if (!owner) return res.status(404).json({ error: 'User not found' });
-    if (owner.role === 'admin') {
-      return res.status(400).json({ error: 'Cannot create a WhatsApp client on an admin login.' });
-    }
-
-    const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-    const createdClient = await WhatsAppClientModel.create({
-      userId: owner._id,
+    const { client, qrShare } = await createWhatsAppClientForOwner(req, owner, {
       name: req.body.name,
-      clientId,
-      sessionPath: `./sessions/${clientId}`,
-      status: 'disconnected'
+      phone: req.body.phone
     });
-
-    const client = await WhatsAppClientModel.findByIdAndUpdate(
-      createdClient._id,
-      { status: 'initializing' },
-      { new: true }
-    );
-
     res.status(201).json({
       client,
-      qrShare: buildQrSharePayload(req, client.clientId),
+      qrShare,
       message: 'WhatsApp client created. Open Share QR and scan when the code appears.'
     });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
 
-    (async () => {
-      try {
-        await createWhatsAppClient(client.clientId);
-      } catch (err) {
-        console.error(`Admin init error for ${client.clientId}:`, err);
-      }
-    })();
+// GET /api/admin/phone-numbers — all WhatsApp clients with owner
+router.get('/phone-numbers', async (_req, res) => {
+  try {
+    const clients = await WhatsAppClientModel.findAllWithOwners({ isActive: true });
+    res.json({
+      count: clients.length,
+      clients
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/phone-numbers — create owner (optional) and add a WhatsApp number
+router.post('/phone-numbers', [
+  body('clientName').trim().notEmpty().withMessage('Phone / client name is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    let owner = null;
+    let createdUser = false;
+
+    if (req.body.userId) {
+      owner = await resolveOwner(req.body.userId);
+      if (!owner) return res.status(404).json({ error: 'User not found' });
+    } else {
+      const name = String(req.body.name || '').trim();
+      const email = String(req.body.email || '').trim().toLowerCase();
+      const password = String(req.body.password || '');
+      if (!name) return res.status(400).json({ error: 'User name is required' });
+      if (!email) return res.status(400).json({ error: 'User email is required' });
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
+
+      const existing = await User.findOne({ email });
+      if (existing) return res.status(400).json({ error: 'Email already registered' });
+
+      owner = await User.create({ name, email, password, role: 'user' });
+      await issueAccountToken(owner);
+      createdUser = true;
+    }
+
+    const { client, qrShare } = await createWhatsAppClientForOwner(req, owner, {
+      name: req.body.clientName,
+      phone: req.body.phone
+    });
+
+    res.status(201).json({
+      createdUser,
+      user: owner.toJSON(),
+      client,
+      qrShare,
+      message: createdUser
+        ? 'User created and phone number added. Open Share QR and scan when the code appears.'
+        : 'Phone number added. Open Share QR and scan when the code appears.'
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

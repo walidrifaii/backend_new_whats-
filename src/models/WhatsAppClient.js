@@ -123,6 +123,28 @@ class WhatsAppClientModel {
     return rows.map(mapRow);
   }
 
+  static async findAllWithOwners({ isActive = true } = {}) {
+    const rows = await query(
+      `SELECT
+         c.id, c.user_id, c.name, c.phone, c.client_id, c.status, c.qr_code,
+         c.session_path, c.last_connected, c.messages_sent, c.is_active,
+         c.created_at, c.updated_at,
+         u.name AS owner_name, u.email AS owner_email, u.role AS owner_role
+       FROM whatsapp_clients c
+       LEFT JOIN users u ON u.id = c.user_id
+       WHERE c.is_active = ?
+       ORDER BY c.created_at DESC`,
+      [isActive ? 1 : 0]
+    );
+
+    return rows.map((row) => ({
+      ...mapRow(row),
+      ownerName: row.owner_name || '',
+      ownerEmail: row.owner_email || '',
+      ownerRole: row.owner_role || ''
+    }));
+  }
+
   static async findOne(filter = {}) {
     const rows = await this.find(filter, { limit: 1, sort: { createdAt: -1 } });
     return rows[0] || null;
