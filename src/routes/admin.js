@@ -51,17 +51,23 @@ const ensureAccountToken = async (user) => {
 
 const buildCredentialsPayload = async (req, user) => {
   const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
-  const token = await ensureAccountToken(user);
-  const clients = owner
-    ? await WhatsAppClientModel.find({ userId: owner._id, isActive: true }, { sort: { createdAt: -1 } })
-    : [];
+  if (!owner) {
+    const err = new Error('Owner account not found');
+    err.status = 404;
+    throw err;
+  }
+  const token = await ensureAccountToken(owner);
+  const clients = await WhatsAppClientModel.find(
+    { userId: owner._id, isActive: true },
+    { sort: { createdAt: -1 } }
+  );
   const apiBaseUrl = getPublicApiBase(req);
   const primaryClient = clients.find((item) => item.status === 'connected') || clients[0] || null;
   const source = user.source || '';
   const envLines = [
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
-    primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient.clientId}` : 'WHATSAPP_NODE_CLIENT_ID=',
+    primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient._id}` : 'WHATSAPP_NODE_CLIENT_ID=',
     source ? `WHATSAPP_NODE_SOURCE=${source}` : null
   ].filter(Boolean);
 
@@ -73,9 +79,11 @@ const buildCredentialsPayload = async (req, user) => {
       source: source || null,
       parentUserId: user.parentUserId || null
     },
-    owner: owner
-      ? { _id: owner._id, name: owner.name, email: owner.email }
-      : null,
+    owner: {
+      _id: owner._id,
+      name: owner.name,
+      email: owner.email
+    },
     token,
     apiBaseUrl,
     otpUrl: apiBaseUrl ? `${apiBaseUrl}/otp/send` : '',
@@ -623,15 +631,16 @@ router.post('/users/:id/credentials/regenerate', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.authToken) {
-      await TokenSession.revoke(user.authToken);
+    const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
+    if (!owner) return res.status(404).json({ error: 'Owner account not found' });
+    if (owner.authToken) {
+      await TokenSession.revoke(owner.authToken);
     }
-    await issueAccountToken(user);
-    const next = await User.findById(user._id);
-    const credentials = await buildCredentialsPayload(req, next);
+    await issueAccountToken(owner);
+    const credentials = await buildCredentialsPayload(req, user);
     res.json({
       ...credentials,
-      message: 'New token created. Update the other server with this token.'
+      message: 'New owner token created. Update the other server with this token.'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
