@@ -1,12 +1,13 @@
 const { query } = require('../db/mysql');
 const { generateObjectId } = require('../utils/objectId');
+const { OTP_NUMBER } = require('../db/tables');
 
 const mapRow = (row) => {
   if (!row) return null;
   return {
     _id: row.id,
-    userId: row.user_id,
-    clientId: row.client_id,
+    userId: row.client_id,
+    clientId: row.OTP_NUMBER_id || row.otp_number_id,
     campaignId: row.campaign_id,
     contactId: row.contact_id,
     phone: row.phone,
@@ -24,7 +25,7 @@ const buildFilter = (filter = {}) => {
   const clauses = [];
   const values = [];
   if (filter.userId !== undefined) {
-    clauses.push('ml.user_id = ?');
+    clauses.push('ml.client_id = ?');
     values.push(String(filter.userId));
   }
   if (filter.campaignId !== undefined) {
@@ -32,7 +33,7 @@ const buildFilter = (filter = {}) => {
     values.push(String(filter.campaignId));
   }
   if (filter.clientId !== undefined) {
-    clauses.push('ml.client_id = ?');
+    clauses.push('ml.OTP_NUMBER_id = ?');
     values.push(String(filter.clientId));
   }
   if (filter.direction !== undefined) {
@@ -76,7 +77,7 @@ class MessageLogModel {
       }
     }
     try {
-      await query(`ALTER TABLE message_logs ADD INDEX idx_message_logs_user_source (user_id, source)`);
+      await query(`ALTER TABLE message_logs ADD INDEX idx_message_logs_client_source (client_id, source)`);
     } catch (err) {
       if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
         throw err;
@@ -88,12 +89,13 @@ class MessageLogModel {
     const id = generateObjectId();
     await query(
       `INSERT INTO message_logs (
-        id, user_id, client_id, campaign_id, contact_id, phone, message, direction,
+        id, client_id, App_id, OTP_NUMBER_id, campaign_id, contact_id, phone, message, direction,
         status, whatsapp_message_id, error, source, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         id,
         data.userId,
+        data.appId || null,
         data.clientId,
         data.campaignId || null,
         data.contactId || null,
@@ -113,13 +115,13 @@ class MessageLogModel {
     const { clauses, values } = buildFilter(filter);
     let sql = `
       SELECT
-        ml.id, ml.user_id, ml.client_id, ml.campaign_id, ml.contact_id,
+        ml.id, ml.client_id, ml.App_id, ml.OTP_NUMBER_id, ml.campaign_id, ml.contact_id,
         ml.phone, ml.message, ml.direction, ml.status,
         ml.whatsapp_message_id, ml.error, ml.source, ml.timestamp,
-        wc.name AS client_name, wc.phone AS client_phone,
+        wc.title AS client_name, wc.number AS client_phone,
         c.name AS campaign_name
       FROM message_logs ml
-      LEFT JOIN phone_numbers wc ON wc.id = ml.client_id
+      LEFT JOIN ${OTP_NUMBER} wc ON wc.id = ml.OTP_NUMBER_id
       LEFT JOIN campaigns c ON c.id = ml.campaign_id
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
@@ -177,13 +179,13 @@ class MessageLogModel {
     const logRows = await query(
       `SELECT DISTINCT source AS source
        FROM message_logs
-       WHERE user_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
+       WHERE client_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
       [String(userId)]
     );
     const campaignRows = await query(
       `SELECT DISTINCT source AS source
        FROM campaigns
-       WHERE user_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
+       WHERE client_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
       [String(userId)]
     );
     return [...new Set(

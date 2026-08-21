@@ -5,8 +5,9 @@ const mapRow = (row) => {
   if (!row) return null;
   return {
     _id: row.id,
-    userId: row.user_id,
-    clientId: row.client_id,
+    userId: row.client_id,
+    clientId: row.OTP_NUMBER_id || row.otp_number_id,
+    appId: row.App_id || row.app_id || null,
     message: row.message,
     mediaUrl: row.media_url,
     status: row.status,
@@ -33,11 +34,11 @@ const buildFilter = (filter = {}) => {
     values.push(String(filter._id));
   }
   if (filter.userId !== undefined) {
-    clauses.push('user_id = ?');
+    clauses.push('client_id = ?');
     values.push(String(filter.userId));
   }
   if (filter.clientId !== undefined) {
-    clauses.push('client_id = ?');
+    clauses.push('OTP_NUMBER_id = ?');
     values.push(String(filter.clientId));
   }
   if (filter.status !== undefined) {
@@ -51,8 +52,9 @@ const buildUpdate = (update = {}) => {
   const set = [];
   const values = [];
   const map = {
-    userId: 'user_id',
-    clientId: 'client_id',
+    userId: 'client_id',
+    clientId: 'OTP_NUMBER_id',
+    appId: 'App_id',
     message: 'message',
     mediaUrl: 'media_url',
     status: 'status',
@@ -93,8 +95,9 @@ class MessageJobModel {
     await query(`
       CREATE TABLE IF NOT EXISTS message_jobs (
         id CHAR(24) NOT NULL,
-        user_id CHAR(24) NOT NULL,
         client_id CHAR(24) NOT NULL,
+        App_id CHAR(24) NULL,
+        OTP_NUMBER_id CHAR(24) NOT NULL,
         message TEXT NOT NULL,
         media_url VARCHAR(2048) NULL,
         status ENUM('queued', 'running', 'completed', 'failed', 'cancelled')
@@ -112,15 +115,9 @@ class MessageJobModel {
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        KEY idx_message_jobs_user_id (user_id),
         KEY idx_message_jobs_client_id (client_id),
-        KEY idx_message_jobs_status (status),
-        CONSTRAINT fk_message_jobs_user
-          FOREIGN KEY (user_id) REFERENCES users (id)
-          ON DELETE CASCADE ON UPDATE CASCADE,
-        CONSTRAINT fk_message_jobs_client
-          FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
-          ON DELETE CASCADE ON UPDATE CASCADE
+        KEY idx_message_jobs_otp_number_id (OTP_NUMBER_id),
+        KEY idx_message_jobs_status (status)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
@@ -128,7 +125,7 @@ class MessageJobModel {
       CREATE TABLE IF NOT EXISTS message_job_items (
         id CHAR(24) NOT NULL,
         job_id CHAR(24) NOT NULL,
-        user_id CHAR(24) NOT NULL,
+        client_id CHAR(24) NOT NULL,
         phone VARCHAR(40) NOT NULL,
         status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
         whatsapp_message_id VARCHAR(255) NULL,
@@ -138,13 +135,10 @@ class MessageJobModel {
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY idx_message_job_items_job_status (job_id, status),
-        KEY idx_message_job_items_user_id (user_id),
+        KEY idx_message_job_items_client_id (client_id),
         KEY idx_message_job_items_scheduled (job_id, status, scheduled_at),
         CONSTRAINT fk_message_job_items_job
           FOREIGN KEY (job_id) REFERENCES message_jobs (id)
-          ON DELETE CASCADE ON UPDATE CASCADE,
-        CONSTRAINT fk_message_job_items_user
-          FOREIGN KEY (user_id) REFERENCES users (id)
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
@@ -174,7 +168,7 @@ class MessageJobModel {
   static async findOne(filter = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, user_id, client_id, message, media_url, status,
+      SELECT id, client_id, App_id, OTP_NUMBER_id, message, media_url, status,
              min_delay, max_delay, spread_hours, estimated_completed_at,
              total_count, sent_count, failed_count,
              pending_count, started_at, completed_at, created_at, updated_at
@@ -199,14 +193,15 @@ class MessageJobModel {
 
     await query(
       `INSERT INTO message_jobs (
-        id, user_id, client_id, message, media_url, status,
+        id, client_id, App_id, OTP_NUMBER_id, message, media_url, status,
         min_delay, max_delay, spread_hours, estimated_completed_at,
         total_count, sent_count, failed_count, pending_count,
         started_at, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
         String(data.userId),
+        data.appId || null,
         String(data.clientId),
         String(data.message || ''),
         data.mediaUrl || null,

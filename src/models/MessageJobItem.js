@@ -6,7 +6,7 @@ const mapRow = (row) => {
   return {
     _id: row.id,
     jobId: row.job_id,
-    userId: row.user_id,
+    userId: row.client_id,
     phone: row.phone,
     status: row.status,
     whatsappMessageId: row.whatsapp_message_id,
@@ -29,7 +29,7 @@ const buildFilter = (filter = {}) => {
     values.push(String(filter.jobId));
   }
   if (filter.userId !== undefined) {
-    clauses.push('user_id = ?');
+    clauses.push('client_id = ?');
     values.push(String(filter.userId));
   }
   if (filter.status !== undefined) {
@@ -62,7 +62,7 @@ class MessageJobItemModel {
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
+      SELECT id, job_id, client_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
       FROM message_job_items
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
@@ -98,7 +98,7 @@ class MessageJobItemModel {
 
   static async findEarliestPending(jobId) {
     const rows = await query(
-      `SELECT id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
+      `SELECT id, job_id, client_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
        FROM message_job_items
        WHERE job_id = ? AND status = 'pending'
        ORDER BY COALESCE(scheduled_at, created_at) ASC, created_at ASC
@@ -156,7 +156,7 @@ class MessageJobItemModel {
 
     await query(
       `INSERT INTO message_job_items (
-        id, job_id, user_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
+        id, job_id, client_id, phone, status, whatsapp_message_id, error, scheduled_at, sent_at, created_at
       ) VALUES ${placeholders.join(', ')}`,
       values
     );
@@ -166,7 +166,7 @@ class MessageJobItemModel {
   static async findByIdAndUpdate(id, update = {}) {
     const map = {
       jobId: 'job_id',
-      userId: 'user_id',
+      userId: 'client_id',
       phone: 'phone',
       status: 'status',
       whatsappMessageId: 'whatsapp_message_id',

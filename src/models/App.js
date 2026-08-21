@@ -1,15 +1,17 @@
 const { query } = require('../db/mysql');
 const { generateObjectId } = require('../utils/objectId');
 const { normalizeMessageSource } = require('../utils/messageSource');
+const { APP, CLIENT, OTP_NUMBER } = require('../db/tables');
+const { tableExists } = require('../db/alignDiagramSchema');
 
 const mapRow = (row) => {
   if (!row) return null;
   return {
     _id: row.id,
-    clientId: row.user_id,
-    otpNumberId: row.phone_number_id,
+    clientId: row.client_id || row.user_id,
+    otpNumberId: row.OTP_NUMBER_id || row.otp_number_id || row.phone_number_id,
     service: row.service || null,
-    isActive: Boolean(row.is_active),
+    isActive: Boolean(row.Active ?? row.active ?? row.is_active),
     balance: Number(row.balance) || 0,
     createdAt: row.created_at
   };
@@ -18,106 +20,78 @@ const mapRow = (row) => {
 class AppModel {
   static async ensureTable() {
     await query(`
-      CREATE TABLE IF NOT EXISTS apps (
+      CREATE TABLE IF NOT EXISTS ${APP} (
         id CHAR(24) NOT NULL,
-        phone_number_id CHAR(24) NOT NULL,
-        user_id CHAR(24) NOT NULL,
+        client_id CHAR(24) NOT NULL,
+        OTP_NUMBER_id CHAR(24) NOT NULL,
         service VARCHAR(64) NOT NULL,
-        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        \`Active\` BOOLEAN NOT NULL DEFAULT TRUE,
         balance INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        UNIQUE KEY uq_apps_client_number_service (user_id, phone_number_id, service),
-        KEY idx_apps_phone_number_id (phone_number_id),
-        KEY idx_apps_user_id (user_id)
+        UNIQUE KEY uq_app_client_number_service (client_id, OTP_NUMBER_id, service),
+        KEY idx_app_otp_number_id (OTP_NUMBER_id),
+        KEY idx_app_client_id (client_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
-
-    const columns = [
-      ['service', 'VARCHAR(64) NULL'],
-      ['is_active', 'BOOLEAN NOT NULL DEFAULT TRUE'],
-      ['balance', 'INT NOT NULL DEFAULT 0']
-    ];
-    for (const [name, def] of columns) {
-      try {
-        await query(`ALTER TABLE apps ADD COLUMN ${name} ${def}`);
-      } catch (err) {
-        if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-          throw err;
-        }
-      }
-    }
-
-    await query(`UPDATE apps SET service = 'default' WHERE service IS NULL OR service = ''`);
-
-    try {
-      await query('ALTER TABLE apps DROP INDEX uq_apps_client_service');
-    } catch (_) {
-      /* old unique may not exist */
-    }
-
-    try {
-      await query('CREATE UNIQUE INDEX uq_apps_client_number_service ON apps (user_id, phone_number_id, service)');
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
-        throw err;
-      }
-    }
-
-    try {
-      await query(`ALTER TABLE users ADD COLUMN current_app_id CHAR(24) NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
 
     await this.syncFromAssignments();
     await this.syncFromSources();
   }
 
   static async syncFromAssignments() {
-    const rows = await query(`
-      SELECT pnu.user_id, pnu.phone_number_id, pn.message_balance
-      FROM phone_number_users pnu
-      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
-    `);
-    for (const row of rows) {
-      await this.assignToClient(row.user_id, row.phone_number_id, {
-        balance: Number(row.message_balance) || 0
-      });
+    if (!(await tableExists('phone_number_users'))) return;
+    const otpTable = (await tableExists('OTP_NUMBER')) ? OTP_NUMBER : 'phone_numbers';
+    try {
+      const rows = await query(`
+        SELECT pnu.user_id, pnu.phone_number_id, pn.message_balance
+        FROM phone_number_users pnu
+        INNER JOIN ${otpTable} pn ON pn.id = pnu.phone_number_id
+      `);
+      for (const row of rows) {
+        await this.assignToClient(row.user_id, row.phone_number_id, {
+          balance: Number(row.message_balance) || 0
+        });
+      }
+    } catch (err) {
+      console.warn('App.syncFromAssignments skipped:', err.message);
     }
   }
 
   static async syncFromSources() {
-    const rows = await query(`
-      SELECT us.user_id, us.source, us.enabled, us.phone_number_id, u.message_balance
-      FROM user_sources us
-      INNER JOIN users u ON u.id = us.user_id
-      WHERE us.source IS NOT NULL AND us.source <> ''
-    `);
-    for (const row of rows) {
-      await this.upsert({
-        clientId: row.user_id,
-        otpNumberId: row.phone_number_id,
-        service: row.source,
-        isActive: Boolean(row.enabled),
-        balance: Number(row.message_balance) || 0
-      });
+    if (!(await tableExists('user_sources'))) return;
+    try {
+      const rows = await query(`
+        SELECT us.user_id, us.source, us.enabled, us.phone_number_id, u.message_balance
+        FROM user_sources us
+        INNER JOIN ${CLIENT} u ON u.id = us.user_id
+        WHERE us.source IS NOT NULL AND us.source <> ''
+      `);
+      for (const row of rows) {
+        await this.upsert({
+          clientId: row.user_id,
+          otpNumberId: row.phone_number_id,
+          service: row.source,
+          isActive: Boolean(row.enabled),
+          balance: Number(row.message_balance) || 0
+        });
+      }
+    } catch (err) {
+      console.warn('App.syncFromSources skipped:', err.message);
     }
   }
 
   static async findById(id) {
     if (!id) return null;
-    const rows = await query(`SELECT * FROM apps WHERE id = ? LIMIT 1`, [String(id)]);
+    const rows = await query(`SELECT * FROM ${APP} WHERE id = ? LIMIT 1`, [String(id)]);
     return mapRow(rows[0]);
   }
 
   static async listForClient(clientId, { activeOnly = false } = {}) {
     if (!clientId) return [];
     const sql = activeOnly
-      ? `SELECT * FROM apps WHERE user_id = ? AND is_active = 1 ORDER BY service ASC`
-      : `SELECT * FROM apps WHERE user_id = ? ORDER BY service ASC`;
+      ? `SELECT * FROM ${APP} WHERE client_id = ? AND \`Active\` = 1 ORDER BY service ASC`
+      : `SELECT * FROM ${APP} WHERE client_id = ? ORDER BY service ASC`;
     const rows = await query(sql, [String(clientId)]);
     return rows.map(mapRow);
   }
@@ -126,7 +100,7 @@ class AppModel {
     const name = normalizeMessageSource(service);
     if (!clientId || !name) return null;
     const rows = await query(
-      `SELECT * FROM apps WHERE user_id = ? AND service = ? LIMIT 1`,
+      `SELECT * FROM ${APP} WHERE client_id = ? AND service = ? LIMIT 1`,
       [String(clientId), name]
     );
     return mapRow(rows[0]);
@@ -136,7 +110,7 @@ class AppModel {
     const name = normalizeMessageSource(service) || 'whatsapp';
     if (!clientId || !otpNumberId) return null;
     const rows = await query(
-      `SELECT * FROM apps WHERE user_id = ? AND phone_number_id = ? AND service = ? LIMIT 1`,
+      `SELECT * FROM ${APP} WHERE client_id = ? AND OTP_NUMBER_id = ? AND service = ? LIMIT 1`,
       [String(clientId), String(otpNumberId), name]
     );
     return mapRow(rows[0]);
@@ -156,13 +130,13 @@ class AppModel {
     if (!otpNumberId) return;
     if (clientId) {
       await query(
-        `UPDATE apps SET is_active = 0 WHERE user_id = ? AND phone_number_id = ?`,
+        `UPDATE ${APP} SET \`Active\` = 0 WHERE client_id = ? AND OTP_NUMBER_id = ?`,
         [String(clientId), String(otpNumberId)]
       );
       return;
     }
     await query(
-      `UPDATE apps SET is_active = 0 WHERE phone_number_id = ?`,
+      `UPDATE ${APP} SET \`Active\` = 0 WHERE OTP_NUMBER_id = ?`,
       [String(otpNumberId)]
     );
   }
@@ -173,20 +147,20 @@ class AppModel {
 
     const existing = await this.findByClientNumber(clientId, otpNumberId, name);
     if (existing) {
-      const sets = ['is_active = ?'];
+      const sets = ['`Active` = ?'];
       const values = [isActive ? 1 : 0];
       if (balance !== undefined) {
         sets.push('balance = ?');
         values.push(Math.max(0, parseInt(balance, 10) || 0));
       }
       values.push(existing._id);
-      await query(`UPDATE apps SET ${sets.join(', ')} WHERE id = ?`, values);
+      await query(`UPDATE ${APP} SET ${sets.join(', ')} WHERE id = ?`, values);
       return this.findById(existing._id);
     }
 
     const id = generateObjectId();
     await query(
-      `INSERT INTO apps (id, phone_number_id, user_id, service, is_active, balance, created_at)
+      `INSERT INTO ${APP} (id, OTP_NUMBER_id, client_id, service, \`Active\`, balance, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NOW())`,
       [
         id,
@@ -221,7 +195,7 @@ class AppModel {
   }
 
   static async setCurrent(clientId, appId) {
-    await query(`UPDATE users SET current_app_id = ? WHERE id = ?`, [
+    await query(`UPDATE ${CLIENT} SET \`current_App_id\` = ? WHERE id = ?`, [
       appId ? String(appId) : null,
       String(clientId)
     ]);
@@ -231,7 +205,7 @@ class AppModel {
   static async decrementBalance(appId, amount = 1) {
     if (!appId) return null;
     await query(
-      `UPDATE apps SET balance = GREATEST(balance - ?, 0) WHERE id = ?`,
+      `UPDATE ${APP} SET balance = GREATEST(balance - ?, 0) WHERE id = ?`,
       [Math.max(1, parseInt(amount, 10) || 1), String(appId)]
     );
     return this.findById(appId);
@@ -240,7 +214,7 @@ class AppModel {
   static async addBalance(appId, amount = 0) {
     if (!appId) return null;
     await query(
-      `UPDATE apps SET balance = balance + ? WHERE id = ?`,
+      `UPDATE ${APP} SET balance = balance + ? WHERE id = ?`,
       [Math.max(0, parseInt(amount, 10) || 0), String(appId)]
     );
     return this.findById(appId);

@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const { testConnection } = require('./db/mysql');
+const { alignDiagramSchema } = require('./db/alignDiagramSchema');
 
 const authRoutes     = require('./routes/auth');
 const clientRoutes   = require('./routes/clients');
@@ -223,13 +224,14 @@ if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_NAME) {
 testConnection()
   .then(async (ok) => {
     if (!ok) throw new Error('MySQL ping failed');
+    await alignDiagramSchema();
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     await Plan.ensureTable();
-    await UserSource.ensureTable();
+    await WhatsAppClientModel.ensurePoolColumns();
     const App = require('./models/App');
     await App.ensureTable();
-    await WhatsAppClientModel.ensurePoolColumns();
+    await UserSource.ensureTable();
     await MessageJob.ensureTables();
     await MessageLog.ensureSourceColumn();
     await Campaign.ensureSourceColumn();

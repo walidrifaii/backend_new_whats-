@@ -1,5 +1,6 @@
 const { query } = require('../db/mysql');
 const { generateObjectId } = require('../utils/objectId');
+const { PLAN } = require('../db/tables');
 
 const mapRow = (row) => {
   if (!row) return null;
@@ -7,7 +8,8 @@ const mapRow = (row) => {
     _id: row.id,
     name: row.name,
     slug: row.slug,
-    messageQuota: Number(row.message_quota) || 0,
+    messageQuota: Number(row.credits ?? row.message_quota) || 0,
+    amount: Number(row.amount) || 0,
     sourceLimit: Number(row.source_limit) || 1,
     isActive: Boolean(row.is_active),
     sortOrder: Number(row.sort_order) || 0,
@@ -19,24 +21,25 @@ const mapRow = (row) => {
 class PlanModel {
   static async ensureTable() {
     await query(`
-      CREATE TABLE IF NOT EXISTS plans (
+      CREATE TABLE IF NOT EXISTS ${PLAN} (
         id CHAR(24) NOT NULL PRIMARY KEY,
-        name VARCHAR(64) NOT NULL,
-        slug VARCHAR(32) NOT NULL,
-        message_quota INT NOT NULL DEFAULT 500,
+        name VARCHAR(120) NOT NULL,
+        credits INT NOT NULL DEFAULT 0,
+        amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         source_limit INT NOT NULL DEFAULT 1,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
+        slug VARCHAR(32) NULL,
         sort_order INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_plans_slug (slug)
+        UNIQUE KEY uq_plan_slug (slug)
       )
     `);
     await this.seedDefaults();
   }
 
   static async seedDefaults() {
-    const rows = await query(`SELECT COUNT(*) AS total FROM plans`);
+    const rows = await query(`SELECT COUNT(*) AS total FROM ${PLAN}`);
     if ((rows[0]?.total || 0) > 0) return;
 
     const defaults = [
@@ -51,19 +54,19 @@ class PlanModel {
 
   static async findAll({ activeOnly = false } = {}) {
     const sql = activeOnly
-      ? `SELECT * FROM plans WHERE is_active = 1 ORDER BY sort_order ASC, name ASC`
-      : `SELECT * FROM plans ORDER BY sort_order ASC, name ASC`;
+      ? `SELECT * FROM ${PLAN} WHERE is_active = 1 ORDER BY sort_order ASC, name ASC`
+      : `SELECT * FROM ${PLAN} ORDER BY sort_order ASC, name ASC`;
     const rows = await query(sql);
     return rows.map(mapRow);
   }
 
   static async findById(id) {
-    const rows = await query(`SELECT * FROM plans WHERE id = ? LIMIT 1`, [String(id)]);
+    const rows = await query(`SELECT * FROM ${PLAN} WHERE id = ? LIMIT 1`, [String(id)]);
     return mapRow(rows[0]);
   }
 
   static async findBySlug(slug) {
-    const rows = await query(`SELECT * FROM plans WHERE slug = ? LIMIT 1`, [String(slug)]);
+    const rows = await query(`SELECT * FROM ${PLAN} WHERE slug = ? LIMIT 1`, [String(slug)]);
     return mapRow(rows[0]);
   }
 
@@ -77,7 +80,7 @@ class PlanModel {
     const sortOrder = parseInt(data.sortOrder, 10) || 0;
 
     await query(
-      `INSERT INTO plans (id, name, slug, message_quota, source_limit, is_active, sort_order)
+      `INSERT INTO ${PLAN} (id, name, slug, credits, source_limit, is_active, sort_order)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, name, slug, messageQuota, sourceLimit, isActive, sortOrder]
     );
@@ -96,7 +99,7 @@ class PlanModel {
       values.push(String(data.slug).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32));
     }
     if (data.messageQuota !== undefined) {
-      set.push('message_quota = ?');
+      set.push('credits = ?');
       values.push(Math.max(1, parseInt(data.messageQuota, 10) || 1));
     }
     if (data.sourceLimit !== undefined) {
@@ -114,7 +117,7 @@ class PlanModel {
     if (set.length === 0) return this.findById(id);
 
     values.push(String(id));
-    await query(`UPDATE plans SET ${set.join(', ')} WHERE id = ?`, values);
+    await query(`UPDATE ${PLAN} SET ${set.join(', ')} WHERE id = ?`, values);
     return this.findById(id);
   }
 }

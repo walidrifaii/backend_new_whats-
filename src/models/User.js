@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { query } = require('../db/mysql');
 const { generateObjectId } = require('../utils/objectId');
+const { CLIENT } = require('../db/tables');
 
 const mapRowToUser = (row) => {
   if (!row) return null;
@@ -16,8 +17,8 @@ const mapRowToUser = (row) => {
     messageBalance: row.message_balance ?? 0,
     parentUserId: row.parent_user_id || null,
     source: row.source || null,
-    allowSourceSwitch: !!row.allow_source_switch,
-    currentAppId: row.current_app_id || null,
+    allowSourceSwitch: !!(row.allow_service_switch ?? row.allow_source_switch),
+    currentAppId: row.current_App_id || row.current_app_id || null,
     planId: row.plan_id || null,
     planStatus: row.plan_status || 'none',
     isServiceAccount: Boolean(row.parent_user_id),
@@ -37,115 +38,102 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
-  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, allow_source_switch, current_app_id, plan_id, plan_status, created_at';
+  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, allow_service_switch, `current_App_id`, plan_id, plan_status, created_at';
+
+  static async ensureTable() {
+    await query(`
+      CREATE TABLE IF NOT EXISTS ${CLIENT} (
+        id CHAR(24) NOT NULL,
+        name VARCHAR(120) NOT NULL,
+        email VARCHAR(190) NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        allow_service_switch BOOLEAN NOT NULL DEFAULT FALSE,
+        \`current_App_id\` CHAR(24) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
+        auth_token TEXT NULL,
+        api_token TEXT NULL,
+        api_token_created_at DATETIME NULL,
+        message_balance INT NOT NULL DEFAULT 0,
+        parent_user_id CHAR(24) NULL,
+        source VARCHAR(64) NULL,
+        plan_id CHAR(24) NULL,
+        plan_status VARCHAR(16) NOT NULL DEFAULT 'none',
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_client_email (email),
+        KEY idx_client_parent_user_id (parent_user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  }
 
   static async ensureAuthTokenColumn() {
+    await this.ensureTable();
+    const adds = [
+      ['auth_token', 'TEXT NULL'],
+      ['api_token', 'TEXT NULL'],
+      ['api_token_created_at', 'DATETIME NULL'],
+      ['role', "ENUM('user', 'admin') NOT NULL DEFAULT 'user'"],
+      ['message_balance', 'INT NOT NULL DEFAULT 0'],
+      ['parent_user_id', 'CHAR(24) NULL'],
+      ['source', 'VARCHAR(64) NULL'],
+      ['allow_service_switch', 'BOOLEAN NOT NULL DEFAULT FALSE'],
+      ['current_App_id', 'CHAR(24) NULL'],
+      ['plan_id', 'CHAR(24) NULL'],
+      ['plan_status', "VARCHAR(16) NOT NULL DEFAULT 'none'"]
+    ];
+    for (const [name, def] of adds) {
+      try {
+        await query(`ALTER TABLE ${CLIENT} ADD COLUMN \`${name}\` ${def}`);
+      } catch (err) {
+        if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+          throw err;
+        }
+      }
+    }
     try {
-      await query(`ALTER TABLE users ADD COLUMN auth_token TEXT NULL`);
+      await query(`ALTER TABLE ${CLIENT} ADD INDEX idx_client_parent_user_id (parent_user_id)`);
     } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
         throw err;
       }
     }
     try {
-      await query(`ALTER TABLE users ADD COLUMN api_token TEXT NULL`);
+      await query(`ALTER TABLE ${CLIENT} ADD UNIQUE INDEX uq_client_parent_source (parent_user_id, source)`);
     } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
         throw err;
       }
     }
-    try {
-      await query(`ALTER TABLE users ADD COLUMN api_token_created_at DATETIME NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
-    await this.ensureServiceAccountColumns();
-    await this.ensurePlanColumns();
-    await this.ensureAllowSourceSwitchColumn();
-    await this.ensureCurrentAppColumn();
   }
 
   static async ensureCurrentAppColumn() {
-    try {
-      await query(`ALTER TABLE users ADD COLUMN current_app_id CHAR(24) NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
+    return this.ensureAuthTokenColumn();
   }
 
   static async ensureAllowSourceSwitchColumn() {
-    try {
-      await query(`ALTER TABLE users ADD COLUMN allow_source_switch BOOLEAN NOT NULL DEFAULT FALSE`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
+    return this.ensureAuthTokenColumn();
   }
 
   static async setAllowSourceSwitch(userId, allow) {
     await query(
-      `UPDATE users SET allow_source_switch = ? WHERE id = ?`,
+      `UPDATE ${CLIENT} SET allow_service_switch = ? WHERE id = ?`,
       [allow ? 1 : 0, String(userId)]
     );
     return this.findById(userId);
   }
 
   static async ensureServiceAccountColumns() {
-    try {
-      await query(`ALTER TABLE users ADD COLUMN parent_user_id CHAR(24) NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
-    try {
-      await query(`ALTER TABLE users ADD COLUMN source VARCHAR(64) NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
-    try {
-      await query(`ALTER TABLE users ADD INDEX idx_users_parent_user_id (parent_user_id)`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
-        throw err;
-      }
-    }
-    try {
-      await query(`ALTER TABLE users ADD UNIQUE INDEX uq_users_parent_source (parent_user_id, source)`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
-        throw err;
-      }
-    }
+    return this.ensureAuthTokenColumn();
   }
 
   static async ensurePlanColumns() {
-    try {
-      await query(`ALTER TABLE users ADD COLUMN plan_id CHAR(24) NULL`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
-    try {
-      await query(`ALTER TABLE users ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'none'`);
-    } catch (err) {
-      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
-        throw err;
-      }
-    }
+    return this.ensureAuthTokenColumn();
   }
 
   static async setPlan(userId, planId, status = 'active') {
     await query(
-      `UPDATE users SET plan_id = ?, plan_status = ? WHERE id = ?`,
+      `UPDATE ${CLIENT} SET plan_id = ?, plan_status = ? WHERE id = ?`,
       [planId ? String(planId) : null, String(status || 'none'), String(userId)]
     );
     return this.findById(userId);
@@ -181,7 +169,7 @@ class UserModel {
     }
 
     const rows = await query(
-      `SELECT ${this.COLUMNS} FROM users WHERE ${clauses.join(' AND ')} LIMIT 1`,
+      `SELECT ${this.COLUMNS} FROM ${CLIENT} WHERE ${clauses.join(' AND ')} LIMIT 1`,
       values
     );
     return mapRowToUser(rows[0]);
@@ -189,7 +177,7 @@ class UserModel {
 
   static async findById(id) {
     const rows = await query(
-      `SELECT ${this.COLUMNS} FROM users WHERE id = ? LIMIT 1`,
+      `SELECT ${this.COLUMNS} FROM ${CLIENT} WHERE id = ? LIMIT 1`,
       [id]
     );
     return mapRowToUser(rows[0]);
@@ -197,7 +185,7 @@ class UserModel {
 
   static async findAll() {
     const rows = await query(
-      `SELECT ${this.COLUMNS} FROM users ORDER BY created_at DESC`
+      `SELECT ${this.COLUMNS} FROM ${CLIENT} ORDER BY created_at DESC`
     );
     return rows.map(mapRowToUser);
   }
@@ -214,7 +202,7 @@ class UserModel {
     const source = data.source ? String(data.source) : null;
 
     await query(
-      `INSERT INTO users (id, name, email, password, role, is_active, message_balance, parent_user_id, source, created_at)
+      `INSERT INTO ${CLIENT} (id, name, email, password, role, is_active, message_balance, parent_user_id, source, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [id, name, email, hashedPassword, role, isActive ? 1 : 0, messageBalance, parentUserId, source]
     );
@@ -224,7 +212,7 @@ class UserModel {
 
   static async findByParentUserId(parentUserId) {
     const rows = await query(
-      `SELECT ${this.COLUMNS} FROM users WHERE parent_user_id = ? ORDER BY created_at DESC`,
+      `SELECT ${this.COLUMNS} FROM ${CLIENT} WHERE parent_user_id = ? ORDER BY created_at DESC`,
       [String(parentUserId)]
     );
     return rows.map(mapRowToUser);
@@ -271,7 +259,7 @@ class UserModel {
     const { normalizeMessageSource } = require('../utils/messageSource');
     const sourceName = source == null || source === '' ? null : normalizeMessageSource(source);
     await query(
-      `UPDATE users SET source = ? WHERE id = ?`,
+      `UPDATE ${CLIENT} SET source = ? WHERE id = ?`,
       [sourceName, String(userId)]
     );
     return this.findById(userId);
@@ -279,7 +267,7 @@ class UserModel {
 
   static async updateBalance(userId, newBalance) {
     await query(
-      `UPDATE users SET message_balance = ? WHERE id = ?`,
+      `UPDATE ${CLIENT} SET message_balance = ? WHERE id = ?`,
       [newBalance, userId]
     );
     return this.findById(userId);
@@ -287,7 +275,7 @@ class UserModel {
 
   static async decrementBalance(userId, amount = 1) {
     await query(
-      `UPDATE users SET message_balance = GREATEST(message_balance - ?, 0) WHERE id = ?`,
+      `UPDATE ${CLIENT} SET message_balance = GREATEST(message_balance - ?, 0) WHERE id = ?`,
       [amount, userId]
     );
     return this.findById(userId);
@@ -295,7 +283,7 @@ class UserModel {
 
   static async getBalance(userId) {
     const rows = await query(
-      `SELECT message_balance FROM users WHERE id = ? LIMIT 1`,
+      `SELECT message_balance FROM ${CLIENT} WHERE id = ? LIMIT 1`,
       [userId]
     );
     return rows[0]?.message_balance ?? 0;
@@ -303,7 +291,7 @@ class UserModel {
 
   static async saveToken(userId, token) {
     await query(
-      `UPDATE users
+      `UPDATE ${CLIENT}
        SET auth_token = ?, api_token = ?, api_token_created_at = NOW()
        WHERE id = ?`,
       [String(token), String(token), String(userId)]
@@ -312,7 +300,7 @@ class UserModel {
 
   static async clearToken(userId) {
     await query(
-      `UPDATE users
+      `UPDATE ${CLIENT}
        SET auth_token = NULL, api_token = NULL, api_token_created_at = NULL
        WHERE id = ?`,
       [String(userId)]

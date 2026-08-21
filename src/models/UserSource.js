@@ -1,14 +1,15 @@
 const { query } = require('../db/mysql');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const App = require('./App');
+const { OTP_NUMBER, APP } = require('../db/tables');
 
 const LIST_SQL = `
   SELECT
     us.user_id, us.source, us.enabled, us.phone_number_id, us.created_at,
-    pn.name AS number_name, pn.phone AS number_phone, pn.status AS number_status,
-    pn.client_id AS number_client_id
+    pn.title AS number_name, pn.number AS number_phone, pn.status AS number_status,
+    pn.session_id AS number_client_id
   FROM user_sources us
-  LEFT JOIN phone_numbers pn ON pn.id = us.phone_number_id
+  LEFT JOIN ${OTP_NUMBER} pn ON pn.id = us.phone_number_id
 `;
 
 const mapRow = (row) => {
@@ -42,10 +43,7 @@ class UserSourceModel {
         phone_number_id CHAR(24) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, source),
-        KEY idx_user_sources_phone_number_id (phone_number_id),
-        CONSTRAINT fk_user_sources_user
-          FOREIGN KEY (user_id) REFERENCES users (id)
-          ON DELETE CASCADE ON UPDATE CASCADE
+        KEY idx_user_sources_phone_number_id (phone_number_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     try {
@@ -189,7 +187,7 @@ class UserSourceModel {
     );
     const app = await App.findByClientService(userId, name);
     if (app) {
-      await query(`UPDATE apps SET is_active = 0 WHERE id = ?`, [app._id]);
+      await query(`UPDATE ${APP} SET \`Active\` = 0 WHERE id = ?`, [app._id]);
     }
     return this.list(userId);
   }

@@ -1,8 +1,10 @@
 const { query } = require('../db/mysql');
 const { generateObjectId } = require('../utils/objectId');
+const { OTP_NUMBER, APP, CLIENT } = require('../db/tables');
+const { tableExists } = require('../db/alignDiagramSchema');
 
 const SELECT_COLUMNS = `
-  pn.id, pn.name, pn.phone, pn.client_id, pn.status, pn.qr_code, pn.session_path,
+  pn.id, pn.title AS name, pn.number AS phone, pn.session_id AS client_id, pn.status, pn.qr_code, pn.session_path,
   pn.last_connected, pn.messages_sent, pn.is_active, pn.plan_id, pn.plan_status,
   pn.message_balance, pn.created_at, pn.updated_at
 `;
@@ -66,11 +68,11 @@ const buildFilter = (filter = {}) => {
     values.push(filter.isActive ? 1 : 0);
   }
   if (filter.clientId !== undefined) {
-    clauses.push('pn.client_id = ?');
+    clauses.push('pn.session_id = ?');
     values.push(String(filter.clientId));
   }
   if (filter.phone !== undefined) {
-    clauses.push('pn.phone = ?');
+    clauses.push('pn.number = ?');
     values.push(String(filter.phone));
   }
   if (filter.planId !== undefined) {
@@ -96,9 +98,9 @@ const buildUpdate = (update = {}) => {
   const values = [];
 
   const map = {
-    name: 'name',
-    phone: 'phone',
-    clientId: 'client_id',
+    name: 'title',
+    phone: 'number',
+    clientId: 'session_id',
     status: 'status',
     qrCode: 'qr_code',
     sessionPath: 'session_path',
@@ -134,164 +136,62 @@ const buildUpdate = (update = {}) => {
 
 class WhatsAppClientModel {
   static async tableExists(name) {
-    const rows = await query(
-      `SELECT 1 AS ok
-       FROM information_schema.TABLES
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-       LIMIT 1`,
-      [name]
-    );
-    return rows.length > 0;
+    return tableExists(name);
   }
 
   static async columnExists(table, column) {
     const rows = await query(
       `SELECT 1 AS ok
        FROM information_schema.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND LOWER(TABLE_NAME) = LOWER(?)
+         AND LOWER(COLUMN_NAME) = LOWER(?)
        LIMIT 1`,
-      [table, column]
+      [String(table).replace(/`/g, ''), column]
     );
     return rows.length > 0;
   }
 
   static async ensureTable() {
-    const hasNew = await this.tableExists('phone_numbers');
-    const hasOld = await this.tableExists('whatsapp_clients');
-    if (hasOld && !hasNew) {
-      await query('RENAME TABLE whatsapp_clients TO phone_numbers');
-    }
-
     await query(`
-      CREATE TABLE IF NOT EXISTS phone_numbers (
+      CREATE TABLE IF NOT EXISTS ${OTP_NUMBER} (
         id CHAR(24) NOT NULL,
-        name VARCHAR(160) NOT NULL,
-        phone VARCHAR(40) NULL,
-        client_id VARCHAR(190) NOT NULL,
+        title VARCHAR(120) NOT NULL,
+        number VARCHAR(190) NULL,
+        session_id VARCHAR(190) NOT NULL,
         status ENUM('disconnected', 'initializing', 'qr_ready', 'connected', 'auth_failure')
           NOT NULL DEFAULT 'disconnected',
         qr_code LONGTEXT NULL,
         session_path VARCHAR(500) NULL,
         last_connected DATETIME NULL,
-        messages_sent INT NOT NULL DEFAULT 0,
         is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        messages_sent INT NOT NULL DEFAULT 0,
         plan_id CHAR(24) NULL,
         plan_status VARCHAR(16) NOT NULL DEFAULT 'none',
         message_balance INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        UNIQUE KEY uq_phone_numbers_client_id (client_id),
-        KEY idx_phone_numbers_plan_id (plan_id)
+        UNIQUE KEY uq_otp_number_session_id (session_id),
+        KEY idx_otp_number_plan_id (plan_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }
 
   static async ensureAssignmentTable() {
-    await query(`
-      CREATE TABLE IF NOT EXISTS phone_number_users (
-        phone_number_id CHAR(24) NOT NULL,
-        user_id CHAR(24) NOT NULL,
-        assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (phone_number_id, user_id),
-        KEY idx_phone_number_users_user_id (user_id),
-        CONSTRAINT fk_phone_number_users_number
-          FOREIGN KEY (phone_number_id) REFERENCES phone_numbers (id)
-          ON DELETE CASCADE ON UPDATE CASCADE,
-        CONSTRAINT fk_phone_number_users_user
-          FOREIGN KEY (user_id) REFERENCES users (id)
-          ON DELETE CASCADE ON UPDATE CASCADE
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-  }
-
-  static async dropPhoneNumberUserFks() {
+    if (await this.tableExists('phone_number_users')) return;
     try {
-      const fks = await query(`
-        SELECT CONSTRAINT_NAME AS name
-        FROM information_schema.TABLE_CONSTRAINTS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'phone_numbers'
-          AND CONSTRAINT_TYPE = 'FOREIGN KEY'
-          AND CONSTRAINT_NAME LIKE '%user%'
+      await query(`
+        CREATE TABLE IF NOT EXISTS phone_number_users (
+          phone_number_id CHAR(24) NOT NULL,
+          user_id CHAR(24) NOT NULL,
+          assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (phone_number_id, user_id),
+          KEY idx_phone_number_users_user_id (user_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
-      for (const row of fks) {
-        try {
-          await query(`ALTER TABLE phone_numbers DROP FOREIGN KEY \`${row.name}\``);
-        } catch (err) {
-          if (!ignoreMissing(err)) throw err;
-        }
-      }
     } catch (err) {
-      if (!ignoreDup(err) && err.code !== 'ER_BAD_TABLE_ERROR') throw err;
-    }
-  }
-
-  static async migrateUserPlansOntoNumbers() {
-    if (!(await this.columnExists('phone_numbers', 'user_id'))) return;
-
-    await query(`
-      UPDATE phone_numbers wc
-      INNER JOIN users u ON u.id = wc.user_id
-      SET
-        wc.plan_id = COALESCE(wc.plan_id, u.plan_id),
-        wc.plan_status = CASE
-          WHEN wc.plan_status IS NULL OR wc.plan_status = 'none'
-            THEN COALESCE(NULLIF(u.plan_status, ''), 'none')
-          ELSE wc.plan_status
-        END
-      WHERE wc.user_id IS NOT NULL
-        AND wc.plan_id IS NULL
-        AND u.plan_id IS NOT NULL
-    `);
-
-    await query(`
-      UPDATE phone_numbers wc
-      INNER JOIN (
-        SELECT user_id, MAX(created_at) AS created_at
-        FROM phone_numbers
-        WHERE user_id IS NOT NULL AND is_active = 1
-        GROUP BY user_id
-      ) latest ON latest.user_id = wc.user_id AND latest.created_at = wc.created_at
-      INNER JOIN users u ON u.id = wc.user_id
-      SET wc.message_balance = u.message_balance
-      WHERE wc.message_balance = 0
-        AND u.message_balance > 0
-    `);
-  }
-
-  static async copyLegacyAssignments() {
-    if (!(await this.columnExists('phone_numbers', 'user_id'))) return;
-
-    const assignedAtSelect = (await this.columnExists('phone_numbers', 'assigned_at'))
-      ? 'COALESCE(pn.assigned_at, pn.created_at)'
-      : 'pn.created_at';
-
-    await query(`
-      INSERT IGNORE INTO phone_number_users (phone_number_id, user_id, assigned_at)
-      SELECT pn.id, pn.user_id, ${assignedAtSelect}
-      FROM phone_numbers pn
-      INNER JOIN users u ON u.id = pn.user_id
-      WHERE pn.user_id IS NOT NULL
-    `);
-  }
-
-  static async dropLegacyUserColumn() {
-    await this.dropPhoneNumberUserFks();
-
-    try {
-      await query('ALTER TABLE phone_numbers DROP INDEX idx_phone_numbers_user_id');
-    } catch (err) {
-      if (!ignoreMissing(err) && !ignoreDup(err)) throw err;
-    }
-
-    for (const column of ['user_id', 'assigned_at']) {
-      if (!(await this.columnExists('phone_numbers', column))) continue;
-      try {
-        await query(`ALTER TABLE phone_numbers DROP COLUMN ${column}`);
-      } catch (err) {
-        if (!ignoreMissing(err)) throw err;
-      }
+      if (!ignoreDup(err) && err.code !== 'ER_TABLE_EXISTS_ERROR') throw err;
     }
   }
 
@@ -299,41 +199,37 @@ class WhatsAppClientModel {
     await this.ensureTable();
 
     const columns = [
-      [`plan_id`, `CHAR(24) NULL`],
-      [`plan_status`, `VARCHAR(16) NOT NULL DEFAULT 'none'`],
-      [`message_balance`, `INT NOT NULL DEFAULT 0`]
+      ['session_id', 'VARCHAR(190) NULL'],
+      ['title', "VARCHAR(120) NOT NULL DEFAULT ''"],
+      ['number', 'VARCHAR(190) NULL'],
+      ['plan_id', 'CHAR(24) NULL'],
+      ['plan_status', "VARCHAR(16) NOT NULL DEFAULT 'none'"],
+      ['message_balance', 'INT NOT NULL DEFAULT 0'],
+      ['messages_sent', 'INT NOT NULL DEFAULT 0'],
+      ['updated_at', 'DATETIME NULL']
     ];
     for (const [name, def] of columns) {
       try {
-        await query(`ALTER TABLE phone_numbers ADD COLUMN ${name} ${def}`);
+        await query(`ALTER TABLE ${OTP_NUMBER} ADD COLUMN ${name} ${def}`);
       } catch (err) {
         if (!ignoreDup(err)) throw err;
       }
     }
 
-    try {
-      await query('CREATE INDEX idx_phone_numbers_plan_id ON phone_numbers (plan_id)');
-    } catch (err) {
-      if (!ignoreDup(err)) throw err;
-    }
-
-    await this.migrateUserPlansOntoNumbers();
     await this.ensureAssignmentTable();
-    await this.copyLegacyAssignments();
-    await this.dropLegacyUserColumn();
   }
 
   static assignmentJoin(filter = {}) {
     if (filter.userId === null) {
       return {
-        join: 'LEFT JOIN phone_number_users pnu ON pnu.phone_number_id = pn.id',
-        clause: 'pnu.user_id IS NULL',
+        join: `LEFT JOIN ${APP} a ON a.OTP_NUMBER_id = pn.id AND a.\`Active\` = 1`,
+        clause: 'a.client_id IS NULL',
         values: []
       };
     }
     if (filter.userId !== undefined) {
       return {
-        join: 'INNER JOIN phone_number_users pnu ON pnu.phone_number_id = pn.id AND pnu.user_id = ?',
+        join: `INNER JOIN ${APP} a ON a.OTP_NUMBER_id = pn.id AND a.client_id = ? AND a.\`Active\` = 1`,
         clause: null,
         values: [String(filter.userId)]
       };
@@ -344,7 +240,7 @@ class WhatsAppClientModel {
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     const assignment = this.assignmentJoin(filter);
-    let sql = `SELECT ${SELECT_COLUMNS} FROM phone_numbers pn ${assignment.join}`;
+    let sql = `SELECT DISTINCT ${SELECT_COLUMNS} FROM ${OTP_NUMBER} pn ${assignment.join}`;
     const where = [...clauses];
     if (assignment.clause) where.push(assignment.clause);
     if (where.length > 0) sql += ` WHERE ${where.join(' AND ')}`;
@@ -372,8 +268,8 @@ class WhatsAppClientModel {
     const id = generateObjectId();
 
     await query(
-      `INSERT INTO phone_numbers (
-        id, name, phone, client_id, status, qr_code, session_path,
+      `INSERT INTO ${OTP_NUMBER} (
+        id, title, number, session_id, status, qr_code, session_path,
         last_connected, messages_sent, is_active, plan_id, plan_status,
         message_balance, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -413,7 +309,7 @@ class WhatsAppClientModel {
     if (set.length === 0) return options.new ? current : null;
 
     await query(
-      `UPDATE phone_numbers SET ${set.join(', ')}, updated_at = NOW() WHERE id = ?`,
+      `UPDATE ${OTP_NUMBER} SET ${set.join(', ')}, updated_at = NOW() WHERE id = ?`,
       [...values, current._id]
     );
 
@@ -423,7 +319,7 @@ class WhatsAppClientModel {
 
   static async getBalance(id) {
     const rows = await query(
-      `SELECT message_balance FROM phone_numbers WHERE id = ? LIMIT 1`,
+      `SELECT message_balance FROM ${OTP_NUMBER} WHERE id = ? LIMIT 1`,
       [String(id)]
     );
     return rows[0]?.message_balance ?? 0;
@@ -431,7 +327,7 @@ class WhatsAppClientModel {
 
   static async updateBalance(id, newBalance) {
     await query(
-      `UPDATE phone_numbers SET message_balance = ?, updated_at = NOW() WHERE id = ?`,
+      `UPDATE ${OTP_NUMBER} SET message_balance = ?, updated_at = NOW() WHERE id = ?`,
       [Math.max(0, parseInt(newBalance, 10) || 0), String(id)]
     );
     return this.findOne({ _id: id });
@@ -439,7 +335,7 @@ class WhatsAppClientModel {
 
   static async decrementBalance(id, amount = 1) {
     await query(
-      `UPDATE phone_numbers
+      `UPDATE ${OTP_NUMBER}
        SET message_balance = GREATEST(message_balance - ?, 0), updated_at = NOW()
        WHERE id = ?`,
       [amount, String(id)]
@@ -449,7 +345,7 @@ class WhatsAppClientModel {
 
   static async setPlan(id, planId, status = 'active') {
     await query(
-      `UPDATE phone_numbers SET plan_id = ?, plan_status = ?, updated_at = NOW() WHERE id = ?`,
+      `UPDATE ${OTP_NUMBER} SET plan_id = ?, plan_status = ?, updated_at = NOW() WHERE id = ?`,
       [planId ? String(planId) : null, String(status || 'none'), String(id)]
     );
     return this.findOne({ _id: id });
@@ -458,7 +354,7 @@ class WhatsAppClientModel {
   static async isAssignedTo(id, userId) {
     if (!id || !userId) return false;
     const rows = await query(
-      `SELECT 1 AS ok FROM phone_number_users WHERE phone_number_id = ? AND user_id = ? LIMIT 1`,
+      `SELECT 1 AS ok FROM ${APP} WHERE OTP_NUMBER_id = ? AND client_id = ? AND \`Active\` = 1 LIMIT 1`,
       [String(id), String(userId)]
     );
     return rows.length > 0;
@@ -466,19 +362,20 @@ class WhatsAppClientModel {
 
   static async listAssignedUserIds(id) {
     const rows = await query(
-      `SELECT user_id FROM phone_number_users WHERE phone_number_id = ? ORDER BY assigned_at ASC`,
+      `SELECT DISTINCT client_id FROM ${APP} WHERE OTP_NUMBER_id = ? AND \`Active\` = 1 ORDER BY created_at ASC`,
       [String(id)]
     );
-    return rows.map((row) => String(row.user_id));
+    return rows.map((row) => String(row.client_id));
   }
 
   static async listAssignedUsers(id) {
     const rows = await query(
-      `SELECT u.id, u.name, u.email, pnu.assigned_at
-       FROM phone_number_users pnu
-       INNER JOIN users u ON u.id = pnu.user_id
-       WHERE pnu.phone_number_id = ?
-       ORDER BY pnu.assigned_at ASC`,
+      `SELECT c.id, c.name, c.email, MIN(a.created_at) AS assigned_at
+       FROM ${APP} a
+       INNER JOIN ${CLIENT} c ON c.id = a.client_id
+       WHERE a.OTP_NUMBER_id = ? AND a.\`Active\` = 1
+       GROUP BY c.id, c.name, c.email
+       ORDER BY assigned_at ASC`,
       [String(id)]
     );
     return rows.map((row) => ({
@@ -494,11 +391,12 @@ class WhatsAppClientModel {
     if (unique.length === 0) return {};
     const placeholders = unique.map(() => '?').join(', ');
     const rows = await query(
-      `SELECT pnu.phone_number_id, u.id, u.name, u.email, pnu.assigned_at
-       FROM phone_number_users pnu
-       INNER JOIN users u ON u.id = pnu.user_id
-       WHERE pnu.phone_number_id IN (${placeholders})
-       ORDER BY pnu.assigned_at ASC`,
+      `SELECT a.OTP_NUMBER_id AS phone_number_id, c.id, c.name, c.email, MIN(a.created_at) AS assigned_at
+       FROM ${APP} a
+       INNER JOIN ${CLIENT} c ON c.id = a.client_id
+       WHERE a.OTP_NUMBER_id IN (${placeholders}) AND a.\`Active\` = 1
+       GROUP BY a.OTP_NUMBER_id, c.id, c.name, c.email
+       ORDER BY assigned_at ASC`,
       unique
     );
     const map = {};
@@ -516,31 +414,49 @@ class WhatsAppClientModel {
   }
 
   static async addUser(id, userId) {
-    await query(
-      `INSERT IGNORE INTO phone_number_users (phone_number_id, user_id, assigned_at)
-       VALUES (?, ?, NOW())`,
-      [String(id), String(userId)]
-    );
+    if (await this.tableExists('phone_number_users')) {
+      try {
+        await query(
+          `INSERT IGNORE INTO phone_number_users (phone_number_id, user_id, assigned_at)
+           VALUES (?, ?, NOW())`,
+          [String(id), String(userId)]
+        );
+      } catch (_) {
+        /* assignment is stored on App */
+      }
+    }
     const App = require('./App');
     await App.assignToClient(userId, id);
     return this.findOne({ _id: id });
   }
 
   static async removeUser(id, userId) {
-    await query(
-      `DELETE FROM phone_number_users WHERE phone_number_id = ? AND user_id = ?`,
-      [String(id), String(userId)]
-    );
+    if (await this.tableExists('phone_number_users')) {
+      try {
+        await query(
+          `DELETE FROM phone_number_users WHERE phone_number_id = ? AND user_id = ?`,
+          [String(id), String(userId)]
+        );
+      } catch (_) {
+        /* assignment is stored on App */
+      }
+    }
     const App = require('./App');
     await App.deactivateForAssignment(userId, id);
     return this.findOne({ _id: id });
   }
 
   static async clearUsers(id) {
-    await query(
-      `DELETE FROM phone_number_users WHERE phone_number_id = ?`,
-      [String(id)]
-    );
+    if (await this.tableExists('phone_number_users')) {
+      try {
+        await query(
+          `DELETE FROM phone_number_users WHERE phone_number_id = ?`,
+          [String(id)]
+        );
+      } catch (_) {
+        /* assignment is stored on App */
+      }
+    }
     const App = require('./App');
     await App.deactivateForAssignment(null, id);
     return this.findOne({ _id: id });

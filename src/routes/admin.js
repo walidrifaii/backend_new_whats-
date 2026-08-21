@@ -9,6 +9,7 @@ const Plan = require('../models/Plan');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const TokenSession = require('../models/TokenSession');
 const { query } = require('../db/mysql');
+const { CLIENT, OTP_NUMBER, APP } = require('../db/tables');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { createWhatsAppClient, isClientConnected } = require('../services/whatsappManager');
@@ -376,12 +377,12 @@ router.get('/users', async (req, res) => {
     const users = await User.findAll();
 
     const stats = await query(`
-      SELECT user_id,
+      SELECT client_id AS user_id,
         COUNT(*) AS total_messages,
         SUM(CASE WHEN status = 'sent' AND direction = 'outgoing' THEN 1 ELSE 0 END) AS sent_count,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
       FROM message_logs
-      GROUP BY user_id
+      GROUP BY client_id
     `);
 
     const statsMap = {};
@@ -395,13 +396,13 @@ router.get('/users', async (req, res) => {
     }
 
     const sourceStats = await query(`
-      SELECT user_id,
+      SELECT client_id AS user_id,
         COALESCE(NULLIF(source, ''), '_untagged') AS source,
         COUNT(*) AS total_messages,
         SUM(CASE WHEN status = 'sent' AND direction = 'outgoing' THEN 1 ELSE 0 END) AS sent_count,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
       FROM message_logs
-      GROUP BY user_id, COALESCE(NULLIF(source, ''), '_untagged')
+      GROUP BY client_id, COALESCE(NULLIF(source, ''), '_untagged')
     `);
     for (const s of sourceStats) {
       if (!statsMap[s.user_id]) {
@@ -416,11 +417,11 @@ router.get('/users', async (req, res) => {
     }
 
     const clientCounts = await query(`
-      SELECT user_id, COUNT(*) AS count
-      FROM phone_number_users pnu
-      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
-      WHERE pn.is_active = 1
-      GROUP BY user_id
+      SELECT a.client_id AS user_id, COUNT(DISTINCT a.OTP_NUMBER_id) AS count
+      FROM ${APP} a
+      INNER JOIN ${OTP_NUMBER} pn ON pn.id = a.OTP_NUMBER_id
+      WHERE pn.is_active = 1 AND a.\`Active\` = 1
+      GROUP BY a.client_id
     `);
     const clientMap = {};
     for (const c of clientCounts) {
@@ -428,10 +429,10 @@ router.get('/users', async (req, res) => {
     }
 
     const clientPhones = await query(`
-      SELECT pnu.user_id, pn.phone, pn.name, pn.status, pn.plan_id, pn.plan_status, pn.message_balance, pn.id
-      FROM phone_number_users pnu
-      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
-      WHERE pn.is_active = 1
+      SELECT a.client_id AS user_id, pn.number AS phone, pn.title AS name, pn.status, pn.plan_id, pn.plan_status, pn.message_balance, pn.id
+      FROM ${APP} a
+      INNER JOIN ${OTP_NUMBER} pn ON pn.id = a.OTP_NUMBER_id
+      WHERE pn.is_active = 1 AND a.\`Active\` = 1
       ORDER BY (pn.status = 'connected') DESC, pn.created_at DESC
     `);
     const phonesMap = {};
@@ -574,7 +575,7 @@ router.patch('/users/:id/toggle-active', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const newStatus = user.isActive ? 0 : 1;
-    await query(`UPDATE users SET is_active = ? WHERE id = ?`, [newStatus, req.params.id]);
+    await query(`UPDATE ${CLIENT} SET is_active = ? WHERE id = ?`, [newStatus, req.params.id]);
     const updated = await User.findById(req.params.id);
     res.json({ user: updated.toJSON() });
   } catch (err) {
@@ -1044,10 +1045,10 @@ router.post('/users/:id/credentials/regenerate', async (req, res) => {
 // GET /api/admin/stats — overall platform stats
 router.get('/stats', async (req, res) => {
   try {
-    const [userCount] = await query(`SELECT COUNT(*) AS count FROM users`);
-    const [activeUsers] = await query(`SELECT COUNT(*) AS count FROM users WHERE is_active = 1`);
-    const [clientCount] = await query(`SELECT COUNT(*) AS count FROM phone_numbers WHERE is_active = 1`);
-    const [connectedClients] = await query(`SELECT COUNT(*) AS count FROM phone_numbers WHERE status = 'connected' AND is_active = 1`);
+    const [userCount] = await query(`SELECT COUNT(*) AS count FROM ${CLIENT}`);
+    const [activeUsers] = await query(`SELECT COUNT(*) AS count FROM ${CLIENT} WHERE is_active = 1`);
+    const [clientCount] = await query(`SELECT COUNT(*) AS count FROM ${OTP_NUMBER} WHERE is_active = 1`);
+    const [connectedClients] = await query(`SELECT COUNT(*) AS count FROM ${OTP_NUMBER} WHERE status = 'connected' AND is_active = 1`);
     const [messageStats] = await query(`
       SELECT
         COUNT(*) AS total,

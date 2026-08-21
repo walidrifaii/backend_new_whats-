@@ -5,8 +5,9 @@ const mapRow = (row) => {
   if (!row) return null;
   return {
     _id: row.id,
-    userId: row.user_id,
-    clientId: row.client_id,
+    userId: row.client_id,
+    clientId: row.OTP_NUMBER_id || row.otp_number_id,
+    appId: row.App_id || row.app_id || null,
     name: row.name,
     message: row.message,
     mediaUrl: row.media_url,
@@ -34,11 +35,11 @@ const buildFilter = (filter = {}) => {
     values.push(String(filter._id));
   }
   if (filter.userId !== undefined) {
-    clauses.push('user_id = ?');
+    clauses.push('client_id = ?');
     values.push(String(filter.userId));
   }
   if (filter.clientId !== undefined) {
-    clauses.push('client_id = ?');
+    clauses.push('OTP_NUMBER_id = ?');
     values.push(String(filter.clientId));
   }
   if (filter.status !== undefined) {
@@ -56,8 +57,9 @@ const buildUpdate = (update = {}) => {
   const set = [];
   const values = [];
   const map = {
-    userId: 'user_id',
-    clientId: 'client_id',
+    userId: 'client_id',
+    clientId: 'OTP_NUMBER_id',
+    appId: 'App_id',
     name: 'name',
     message: 'message',
     mediaUrl: 'media_url',
@@ -108,7 +110,7 @@ class CampaignModel {
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, user_id, client_id, name, message, media_url, media_type, status,
+      SELECT id, client_id, App_id, OTP_NUMBER_id, name, message, media_url, media_type, status,
              min_delay, max_delay, total_contacts, sent_count, failed_count,
              pending_count, started_at, completed_at, source, created_at, updated_at
       FROM campaigns
@@ -152,13 +154,14 @@ class CampaignModel {
 
     await query(
       `INSERT INTO campaigns (
-        id, user_id, client_id, name, message, media_url, media_type, status,
+        id, client_id, App_id, OTP_NUMBER_id, name, message, media_url, media_type, status,
         min_delay, max_delay, total_contacts, sent_count, failed_count, pending_count,
         started_at, completed_at, source, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         id,
         userId,
+        data.appId || null,
         clientId,
         String(data.name || '').trim(),
         String(data.message || '').trim(),

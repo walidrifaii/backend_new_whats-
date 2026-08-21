@@ -5,7 +5,7 @@ const mapRow = (row) => {
   if (!row) return null;
   return {
     _id: row.id,
-    userId: row.user_id,
+    userId: row.client_id,
     campaignId: row.campaign_id,
     name: row.name,
     phone: row.phone,
@@ -29,7 +29,7 @@ const buildFilter = (filter = {}) => {
     values.push(String(filter.campaignId));
   }
   if (filter.userId !== undefined) {
-    clauses.push('user_id = ?');
+    clauses.push('client_id = ?');
     values.push(String(filter.userId));
   }
   if (filter.status !== undefined) {
@@ -43,7 +43,7 @@ class ContactModel {
   static async find(filter = {}, options = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
-      SELECT id, user_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
+      SELECT id, client_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
       FROM contacts
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
@@ -86,7 +86,7 @@ class ContactModel {
     const id = generateObjectId();
     await query(
       `INSERT INTO contacts (
-        id, user_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
+        id, client_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         id,
@@ -127,7 +127,7 @@ class ContactModel {
 
     await query(
       `INSERT INTO contacts (
-        id, user_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
+        id, client_id, campaign_id, name, phone, variables, status, sent_at, error, created_at
       ) VALUES ${placeholders.join(', ')}`,
       values
     );
@@ -144,7 +144,7 @@ class ContactModel {
     const set = [];
     const values = [];
     const map = {
-      userId: 'user_id',
+      userId: 'client_id',
       campaignId: 'campaign_id',
       name: 'name',
       phone: 'phone',
