@@ -7,7 +7,10 @@ const getOwnerUserId = (user) => {
 
 const isServiceAccount = (user) => Boolean(user?.parentUserId);
 
-const getLockedSource = (user) => normalizeMessageSource(user?.source);
+const getLockedSource = (user) => {
+  if (!user?.parentUserId) return '';
+  return normalizeMessageSource(user?.source);
+};
 
 const applySourceScope = (filter, user, requestedSource, allowedSources = null) => {
   const locked = getLockedSource(user);

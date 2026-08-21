@@ -76,18 +76,17 @@ router.post('/login', [
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-    let token = user.authToken;
-    if (!token || !isJwtUsable(token)) {
-      token = signPermanentUserToken(user._id);
-      await User.saveToken(user._id, token);
-    }
-    await TokenSession.createOrUpdate({
+    const token = await issueUserSession(user);
+    const sub = await getAccountSubscription(user);
+    const remaining = sub.status === 'active' ? sub.remaining : user.messageBalance;
+    return res.json({
       token,
-      ownerType: 'user',
-      ownerId: user._id,
-      expiresAt: getTokenExpiryDate(token)
+      user: {
+        ...user.toJSON(),
+        messageBalance: remaining,
+        subscription: serializeSubscription(sub, user)
+      }
     });
-    return res.json({ token, user: user.toJSON() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

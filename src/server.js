@@ -4,7 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
-const { testConnection, query } = require('./db/mysql');
+const { testConnection } = require('./db/mysql');
 
 const authRoutes     = require('./routes/auth');
 const clientRoutes   = require('./routes/clients');
@@ -17,6 +17,7 @@ const adminRoutes    = require('./routes/admin');
 
 const TokenSession        = require('./models/TokenSession');
 const User                = require('./models/User');
+const UserSource          = require('./models/UserSource');
 const Plan                = require('./models/Plan');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const Campaign            = require('./models/Campaign');
@@ -225,13 +226,9 @@ testConnection()
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     await Plan.ensureTable();
+    await UserSource.ensureTable();
     await WhatsAppClientModel.ensurePoolColumns();
     await MessageJob.ensureTables();
-    try {
-      await query('DROP TABLE IF EXISTS user_sources');
-    } catch (err) {
-      console.warn('Could not drop unused user_sources table:', err.message);
-    }
     await MessageLog.ensureSourceColumn();
     await Campaign.ensureSourceColumn();
     console.log('✅ MySQL connected');

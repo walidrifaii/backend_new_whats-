@@ -4,6 +4,7 @@ const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const UserSource = require('../models/UserSource');
 const Plan = require('../models/Plan');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const TokenSession = require('../models/TokenSession');
@@ -473,8 +474,16 @@ router.get('/users', async (req, res) => {
         .map((item) => plansById.get(item.planId))
         .find(Boolean) || null;
       row.plan = numberPlan || plan || null;
-      row.enabledSources = [];
       row.sourceCatalog = [];
+      row.enabledSources = [];
+    }
+
+    const catalogMap = await UserSource.listForUsers(result.map((row) => row.parentUserId || row._id));
+    for (const row of result) {
+      const ownerId = row.parentUserId || row._id;
+      row.sourceCatalog = catalogMap[ownerId] || [];
+      row.enabledSources = row.sourceCatalog.filter((item) => item.enabled).map((item) => item.name);
+      if (row.parentUserId) row.allowSourceSwitch = false;
     }
 
     res.json({ users: result, plans });
@@ -680,16 +689,16 @@ router.patch('/users/:id/source-lock', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.parentUserId) {
-      return res.status(400).json({
-        error: 'The owner already uses the assigned WhatsApp. Lock source only on a service login.'
-      });
-    }
 
     const raw = req.body.source;
     const lockTo = raw == null || raw === '' ? null : normalizeMessageSource(raw);
     if (raw && !lockTo) {
       return res.status(400).json({ error: 'Invalid source name' });
+    }
+    if (!user.parentUserId && lockTo) {
+      return res.status(400).json({
+        error: 'Do not lock the owner login. The owner already switches Shop/CRM in the dashboard.'
+      });
     }
 
     if (lockTo) {
@@ -708,6 +717,92 @@ router.patch('/users/:id/source-lock', async (req, res) => {
         ? `This login is locked to ${lockTo} and cannot switch.`
         : 'Source lock removed. This login can send without a locked source.'
     });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+const ownerSourcesPayload = async (user) => {
+  const sources = await UserSource.list(user._id);
+  const fresh = await User.findById(user._id);
+  return {
+    user: {
+      ...fresh.toJSON(),
+      sourceCatalog: sources,
+      enabledSources: sources.filter((item) => item.enabled).map((item) => item.name),
+      allowSourceSwitch: Boolean(fresh.allowSourceSwitch)
+    }
+  };
+};
+
+// PATCH /api/admin/users/:id/source-switch — super admin allows the owner to switch services
+router.patch('/users/:id/source-switch', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.parentUserId) {
+      return res.status(400).json({ error: 'Set source switch on the owner account, not a service login.' });
+    }
+    const allow = Boolean(req.body.allow);
+    await User.setAllowSourceSwitch(user._id, allow);
+    const payload = await ownerSourcesPayload(user);
+    res.json({
+      ...payload,
+      message: allow
+        ? 'Client can switch between allowed sources.'
+        : 'Client cannot switch sources.'
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/sources — add a source name (shop, crm, …)
+router.post('/users/:id/sources', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ownerId = user.parentUserId || user._id;
+    const enabled = req.body.enabled !== false && req.body.enabled !== 0;
+    await UserSource.upsert(ownerId, req.body.source, enabled);
+    const owner = await User.findById(ownerId);
+    const payload = await ownerSourcesPayload(owner);
+    res.status(201).json({ ...payload, message: `Added source ${normalizeMessageSource(req.body.source)}` });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/users/:id/sources — allow or block one source
+router.patch('/users/:id/sources', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ownerId = user.parentUserId || user._id;
+    await UserSource.setEnabled(ownerId, req.body.source, Boolean(req.body.enabled));
+    const owner = await User.findById(ownerId);
+    const payload = await ownerSourcesPayload(owner);
+    res.json({
+      ...payload,
+      message: req.body.enabled
+        ? `${normalizeMessageSource(req.body.source)} is allowed.`
+        : `${normalizeMessageSource(req.body.source)} is not allowed.`
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:id/sources/:source
+router.delete('/users/:id/sources/:source', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const ownerId = user.parentUserId || user._id;
+    await UserSource.remove(ownerId, req.params.source);
+    const owner = await User.findById(ownerId);
+    const payload = await ownerSourcesPayload(owner);
+    res.json({ ...payload, message: `Removed source ${req.params.source}` });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

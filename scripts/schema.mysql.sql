@@ -17,11 +17,24 @@ CREATE TABLE IF NOT EXISTS users (
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   parent_user_id CHAR(24) NULL,
   source VARCHAR(64) NULL,
+  allow_source_switch BOOLEAN NOT NULL DEFAULT FALSE,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_parent_user_id (parent_user_id),
-  UNIQUE KEY uq_users_parent_source (parent_user_id, source)
+  UNIQUE KEY uq_users_parent_source (parent_user_id, source),
+  KEY idx_users_allow_source_switch (allow_source_switch)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS user_sources (
+  user_id CHAR(24) NOT NULL,
+  source VARCHAR(64) NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, source),
+  CONSTRAINT fk_user_sources_user
+    FOREIGN KEY (user_id) REFERENCES users (id)
+    ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS phone_numbers (

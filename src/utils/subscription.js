@@ -1,5 +1,6 @@
 const Plan = require('../models/Plan');
 const User = require('../models/User');
+const UserSource = require('../models/UserSource');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { getOwnerUserId } = require('./accountScope');
 const { normalizeMessageSource } = require('./messageSource');
@@ -38,7 +39,8 @@ const getOwnerSubscription = async (userOrOwnerId) => {
       sources: [],
       enabledSources: [],
       knownSources: [],
-      remaining: 0
+      remaining: 0,
+      allowSourceSwitch: false
     };
   }
 
@@ -48,6 +50,8 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const numbers = await getAssignedNumbers(ownerId);
   const fromNumbers = await planFromNumbers(numbers);
   const status = fromNumbers.plan ? 'active' : 'none';
+  const sources = await UserSource.list(ownerId);
+  const enabledSources = sources.filter((item) => item.enabled).map((item) => item.name);
 
   return {
     owner,
@@ -55,11 +59,12 @@ const getOwnerSubscription = async (userOrOwnerId) => {
     plan: fromNumbers.plan,
     requestedPlan: fromNumbers.plan,
     status,
-    sources: [],
-    enabledSources: [],
-    knownSources: [],
+    sources,
+    enabledSources,
+    knownSources: enabledSources,
     remaining: fromNumbers.remaining,
-    sourceLimit: fromNumbers.sourceLimit
+    sourceLimit: fromNumbers.sourceLimit,
+    allowSourceSwitch: Boolean(owner?.allowSourceSwitch)
   };
 };
 
@@ -89,6 +94,7 @@ const getAccountSubscription = async (userOrId) => {
     knownSources: ownerSub.knownSources,
     remaining: ownerSub.remaining,
     sourceLimit: 0,
+    allowSourceSwitch: false,
     sharesOwnerWhatsApp: true
   };
 };
@@ -112,18 +118,38 @@ const serializeSubscription = (sub, user = null) => {
     requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
     status: sub.status || 'none',
     remaining: sub.remaining || 0,
-    enabledSources: sub.enabledSources || [],
+  const enabledSources = sub.enabledSources || [];
+  const catalog = sub.sources || [];
+  return {
+    plan: mapPlan(sub.plan),
+    requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
+    status: sub.status || 'none',
+    remaining: sub.remaining || 0,
+    sources: catalog,
+    enabledSources,
     sourceLimit,
-    catalog: sub.enabledSources || [],
+    catalog,
+    allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !isService,
+    canSwitchSources: Boolean(sub.allowSourceSwitch) && !isService && enabledSources.length >= 2,
     sharesOwnerWhatsApp: isService,
     currentSourceEnabled: true
   };
 };
 
-// On/off is display-only (stats/logs). Sending OTP and other messages
-// must still work when a source is off.
-const assertSourceAllowed = (_sub, source) => {
-  return { ok: true, source: normalizeMessageSource(source) };
+const assertSourceAllowed = (sub, source) => {
+  const name = normalizeMessageSource(source);
+  const catalog = sub?.sources || [];
+  if (!name || catalog.length === 0) {
+    return { ok: true, source: name };
+  }
+  const row = catalog.find((item) => item.name === name);
+  if (!row) {
+    return { ok: false, error: `Source "${name}" is not configured for this account.`, source: name };
+  }
+  if (!row.enabled) {
+    return { ok: false, error: `Source "${name}" is not allowed.`, source: name };
+  }
+  return { ok: true, source: name };
 };
 
 const assignPlanToUser = async (user, plan, { refillBalance = true } = {}) => {
