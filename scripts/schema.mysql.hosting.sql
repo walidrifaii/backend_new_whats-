@@ -1,117 +1,99 @@
--- MySQL 8+ schema for shared hosting/phpMyAdmin users
--- NOTE: This file does not create/select database.
--- Select your existing database in phpMyAdmin, then import this file.
+-- phpMyAdmin import — same tables AND same fields as schema.dbml
+-- Select an EMPTY database first, then Import this file.
 
-CREATE TABLE IF NOT EXISTS users (
+-- client: id, name, email, password, is_active, allow_service_switch, current_App_id, created_at
+CREATE TABLE IF NOT EXISTS client (
   id CHAR(24) NOT NULL,
   name VARCHAR(120) NOT NULL,
   email VARCHAR(190) NOT NULL,
   password VARCHAR(255) NOT NULL,
-  role ENUM('admin', 'user') NOT NULL DEFAULT 'user',
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  parent_user_id CHAR(24) NULL,
-  source VARCHAR(64) NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  allow_service_switch BOOLEAN NOT NULL DEFAULT FALSE,
+  `current_App_id` CHAR(24) NULL,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_users_email (email),
-  KEY idx_users_parent_user_id (parent_user_id),
-  UNIQUE KEY uq_users_parent_source (parent_user_id, source)
+  UNIQUE KEY uq_client_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS plans (
+-- OTP_NUMBER: id, title, number, status, qr_code, session_path, last_connected, is_active, created_at
+CREATE TABLE IF NOT EXISTS `OTP_NUMBER` (
   id CHAR(24) NOT NULL,
-  name VARCHAR(64) NOT NULL,
-  slug VARCHAR(32) NOT NULL,
-  message_quota INT NOT NULL DEFAULT 500,
-  source_limit INT NOT NULL DEFAULT 1,
-  amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  sort_order INT NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY uq_plans_slug (slug)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS phone_numbers (
-  id CHAR(24) NOT NULL,
-  name VARCHAR(160) NOT NULL,
-  phone VARCHAR(40) NULL,
-  client_id VARCHAR(190) NOT NULL,
+  title VARCHAR(120) NOT NULL,
+  number VARCHAR(190) NOT NULL,
   status ENUM('disconnected', 'initializing', 'qr_ready', 'connected', 'auth_failure')
-    NOT NULL DEFAULT 'disconnected',
+    NULL DEFAULT 'disconnected',
   qr_code LONGTEXT NULL,
   session_path VARCHAR(500) NULL,
   last_connected DATETIME NULL,
-  messages_sent INT NOT NULL DEFAULT 0,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  plan_id CHAR(24) NULL,
-  plan_status VARCHAR(16) NOT NULL DEFAULT 'none',
-  message_balance INT NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_active BOOLEAN NULL DEFAULT TRUE,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_phone_numbers_client_id (client_id),
-  KEY idx_phone_numbers_plan_id (plan_id)
+  UNIQUE KEY uq_otp_number (number)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS phone_number_users (
-  phone_number_id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
-  assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (phone_number_id, user_id),
-  KEY idx_phone_number_users_user_id (user_id),
-  CONSTRAINT fk_phone_number_users_number
-    FOREIGN KEY (phone_number_id) REFERENCES phone_numbers (id)
-    ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT fk_phone_number_users_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
-    ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS apps (
+-- plan: id, name, credits, amount, source_limit, is_active
+CREATE TABLE IF NOT EXISTS plan (
   id CHAR(24) NOT NULL,
-  phone_number_id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
+  name VARCHAR(120) NOT NULL,
+  credits INT NULL,
+  amount DECIMAL(10,2) NULL,
+  source_limit INT NULL DEFAULT 1,
+  is_active BOOLEAN NULL DEFAULT TRUE,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- App: id, client_id, OTP_NUMBER_id, service, Active, balance, created_at
+CREATE TABLE IF NOT EXISTS `App` (
+  id CHAR(24) NOT NULL,
+  client_id CHAR(24) NOT NULL,
+  `OTP_NUMBER_id` CHAR(24) NOT NULL,
   service VARCHAR(64) NOT NULL,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  balance INT NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `Active` BOOLEAN NULL DEFAULT TRUE,
+  balance INT NULL DEFAULT 0,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_apps_client_service (user_id, service),
-  KEY idx_apps_phone_number_id (phone_number_id),
-  KEY idx_apps_user_id (user_id),
-  CONSTRAINT fk_apps_phone_number
-    FOREIGN KEY (phone_number_id) REFERENCES phone_numbers (id)
+  UNIQUE KEY uq_app_client_service (client_id, service),
+  KEY idx_app_otp_number (`OTP_NUMBER_id`),
+  KEY idx_app_client (client_id),
+  CONSTRAINT fk_app_client
+    FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT fk_apps_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
+  CONSTRAINT fk_app_otp_number
+    FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS subscriptions (
+ALTER TABLE client
+  ADD CONSTRAINT fk_client_current_app
+    FOREIGN KEY (`current_App_id`) REFERENCES `App` (id)
+    ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- subscription: id, client_id, plan_id, credits, amount, Active, created_at
+CREATE TABLE IF NOT EXISTS subscription (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
+  client_id CHAR(24) NOT NULL,
   plan_id CHAR(24) NULL,
-  credits INT NOT NULL DEFAULT 0,
-  amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  credits INT NULL,
+  amount DECIMAL(10,2) NULL,
+  `Active` BOOLEAN NULL DEFAULT TRUE,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_subscriptions_user_id (user_id),
-  KEY idx_subscriptions_plan_id (plan_id),
-  CONSTRAINT fk_subscriptions_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
+  KEY idx_subscription_client (client_id),
+  KEY idx_subscription_plan (plan_id),
+  CONSTRAINT fk_subscription_client
+    FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT fk_subscriptions_plan
-    FOREIGN KEY (plan_id) REFERENCES plans (id)
+  CONSTRAINT fk_subscription_plan
+    FOREIGN KEY (plan_id) REFERENCES plan (id)
     ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- campaigns: same fields as dbdiagram
 CREATE TABLE IF NOT EXISTS campaigns (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
   client_id CHAR(24) NOT NULL,
+  `App_id` CHAR(24) NOT NULL,
+  `OTP_NUMBER_id` CHAR(24) NOT NULL,
   name VARCHAR(200) NOT NULL,
   message TEXT NOT NULL,
   media_url VARCHAR(2048) NULL,
@@ -126,37 +108,40 @@ CREATE TABLE IF NOT EXISTS campaigns (
   pending_count INT NOT NULL DEFAULT 0,
   started_at DATETIME NULL,
   completed_at DATETIME NULL,
-  source VARCHAR(64) NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_campaigns_user_id (user_id),
-  KEY idx_campaigns_client_id (client_id),
-  CONSTRAINT fk_campaigns_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
-    ON DELETE CASCADE ON UPDATE CASCADE,
+  KEY idx_campaigns_client (client_id),
+  KEY idx_campaigns_app (`App_id`),
+  KEY idx_campaigns_otp (`OTP_NUMBER_id`),
   CONSTRAINT fk_campaigns_client
-    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
+    FOREIGN KEY (client_id) REFERENCES client (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_campaigns_app
+    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_campaigns_otp
+    FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS contacts (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
+  client_id CHAR(24) NOT NULL,
   campaign_id CHAR(24) NOT NULL,
   name VARCHAR(200) NULL,
   phone VARCHAR(40) NOT NULL,
   variables JSON NULL,
-  status ENUM('pending', 'sent', 'failed', 'skipped') NOT NULL DEFAULT 'pending',
+  status ENUM('pending', 'sent', 'failed', 'skipped') NULL DEFAULT 'pending',
   sent_at DATETIME NULL,
   error TEXT NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_contacts_campaign_status (campaign_id, status),
   KEY idx_contacts_campaign_phone (campaign_id, phone),
-  KEY idx_contacts_user_id (user_id),
-  CONSTRAINT fk_contacts_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
+  KEY idx_contacts_client (client_id),
+  CONSTRAINT fk_contacts_client
+    FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_contacts_campaign
     FOREIGN KEY (campaign_id) REFERENCES campaigns (id)
@@ -165,28 +150,30 @@ CREATE TABLE IF NOT EXISTS contacts (
 
 CREATE TABLE IF NOT EXISTS message_logs (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
   client_id CHAR(24) NOT NULL,
+  `App_id` CHAR(24) NULL,
+  `OTP_NUMBER_id` CHAR(24) NOT NULL,
   campaign_id CHAR(24) NULL,
   contact_id CHAR(24) NULL,
   phone VARCHAR(40) NOT NULL,
   message TEXT NOT NULL,
-  direction ENUM('outgoing', 'incoming') NOT NULL DEFAULT 'outgoing',
-  status ENUM('sent', 'failed', 'received') NOT NULL DEFAULT 'sent',
+  direction ENUM('outgoing', 'incoming') NULL DEFAULT 'outgoing',
+  status ENUM('sent', 'failed', 'received') NULL DEFAULT 'sent',
   whatsapp_message_id VARCHAR(255) NULL,
   error TEXT NULL,
-  source VARCHAR(64) NULL,
-  timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  timestamp DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_message_logs_user_timestamp (user_id, timestamp),
-  KEY idx_message_logs_campaign_timestamp (campaign_id, timestamp),
-  KEY idx_message_logs_client_timestamp (client_id, timestamp),
-  KEY idx_message_logs_user_source (user_id, source),
-  CONSTRAINT fk_message_logs_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
-    ON DELETE CASCADE ON UPDATE CASCADE,
+  KEY idx_message_logs_client_time (client_id, timestamp),
+  KEY idx_message_logs_otp_time (`OTP_NUMBER_id`, timestamp),
+  KEY idx_message_logs_campaign_time (campaign_id, timestamp),
   CONSTRAINT fk_message_logs_client
-    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
+    FOREIGN KEY (client_id) REFERENCES client (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_message_logs_app
+    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_message_logs_otp
+    FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_logs_campaign
     FOREIGN KEY (campaign_id) REFERENCES campaigns (id)
@@ -198,55 +185,89 @@ CREATE TABLE IF NOT EXISTS message_logs (
 
 CREATE TABLE IF NOT EXISTS message_jobs (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
   client_id CHAR(24) NOT NULL,
+  `App_id` CHAR(24) NULL,
+  `OTP_NUMBER_id` CHAR(24) NOT NULL,
   message TEXT NOT NULL,
   media_url VARCHAR(2048) NULL,
   status ENUM('queued', 'running', 'completed', 'failed', 'cancelled')
-    NOT NULL DEFAULT 'queued',
-  min_delay INT NOT NULL DEFAULT 20000,
-  max_delay INT NOT NULL DEFAULT 30000,
-  spread_hours DECIMAL(8,2) NOT NULL DEFAULT 16,
-  estimated_completed_at DATETIME NULL,
-  total_count INT NOT NULL DEFAULT 0,
-  sent_count INT NOT NULL DEFAULT 0,
-  failed_count INT NOT NULL DEFAULT 0,
-  pending_count INT NOT NULL DEFAULT 0,
+    NULL DEFAULT 'queued',
+  min_delay INT NULL DEFAULT 20000,
+  max_delay INT NULL DEFAULT 30000,
+  spread_hours DECIMAL(8,2) NULL DEFAULT 16,
+  total_count INT NULL DEFAULT 0,
+  sent_count INT NULL DEFAULT 0,
+  failed_count INT NULL DEFAULT 0,
+  pending_count INT NULL DEFAULT 0,
   started_at DATETIME NULL,
   completed_at DATETIME NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_message_jobs_user_id (user_id),
-  KEY idx_message_jobs_client_id (client_id),
+  KEY idx_message_jobs_client (client_id),
+  KEY idx_message_jobs_otp (`OTP_NUMBER_id`),
   KEY idx_message_jobs_status (status),
-  CONSTRAINT fk_message_jobs_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
-    ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_jobs_client
-    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
+    FOREIGN KEY (client_id) REFERENCES client (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_message_jobs_app
+    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_message_jobs_otp
+    FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS message_job_items (
   id CHAR(24) NOT NULL,
   job_id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
+  client_id CHAR(24) NOT NULL,
   phone VARCHAR(40) NOT NULL,
-  status ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
+  status ENUM('pending', 'sent', 'failed') NULL DEFAULT 'pending',
   whatsapp_message_id VARCHAR(255) NULL,
   error TEXT NULL,
   scheduled_at DATETIME NULL,
   sent_at DATETIME NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_message_job_items_job_status (job_id, status),
-  KEY idx_message_job_items_user_id (user_id),
+  KEY idx_message_job_items_client (client_id),
   KEY idx_message_job_items_scheduled (job_id, status, scheduled_at),
   CONSTRAINT fk_message_job_items_job
     FOREIGN KEY (job_id) REFERENCES message_jobs (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT fk_message_job_items_user
-    FOREIGN KEY (user_id) REFERENCES users (id)
+  CONSTRAINT fk_message_job_items_client
+    FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS admins (
+  id INT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(120) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  is_active BOOLEAN NULL DEFAULT TRUE,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_admins_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS token_sessions (
+  id INT NOT NULL AUTO_INCREMENT,
+  token_hash CHAR(64) NOT NULL,
+  token TEXT NOT NULL,
+  owner_type VARCHAR(20) NOT NULL,
+  owner_id VARCHAR(64) NOT NULL,
+  is_active BOOLEAN NULL DEFAULT TRUE,
+  created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uniq_token_hash (token_hash),
+  KEY idx_owner (owner_type, owner_id),
+  KEY idx_active_expiry (is_active, expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO plan (id, name, credits, amount, source_limit, is_active)
+VALUES
+  ('64a000000000000000000001', 'Mini', 500, 0.00, 1, 1),
+  ('64a000000000000000000002', 'Medium', 1000, 0.00, 2, 1),
+  ('64a000000000000000000003', 'Max', 1500, 0.00, 3, 1);
