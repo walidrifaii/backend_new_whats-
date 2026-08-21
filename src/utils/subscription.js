@@ -141,9 +141,8 @@ const serializeSubscription = (sub, user = null) => {
     catalog,
     allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !user?.source,
     canSwitchSources: Boolean(sub.allowSourceSwitch)
-      && Boolean(user?.parentUserId)
       && !user?.source
-      && enabledSources.length >= 2,
+      && (enabledSources.length >= 2 || (sub.apps || []).filter((item) => item.isActive).length >= 2),
     sharesOwnerWhatsApp: isService,
     currentSourceEnabled: true
   };

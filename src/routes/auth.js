@@ -6,8 +6,9 @@ const User = require('../models/User');
 const Admin = require('../models/Admin');
 const TokenSession = require('../models/TokenSession');
 const authMiddleware = require('../middleware/auth');
-const { isServiceAccount } = require('../utils/accountScope');
+const { isServiceAccount, getOwnerUserId } = require('../utils/accountScope');
 const Plan = require('../models/Plan');
+const App = require('../models/App');
 const { getOwnerSubscription, getAccountSubscription, serializeSubscription } = require('../utils/subscription');
 
 const getTokenExpiryDate = (token) => {
@@ -194,6 +195,45 @@ router.get('/me', authMiddleware, async (req, res) => {
         messageBalance: remaining,
         subscription: serializeSubscription(sub, req.user)
       }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/auth/current-app — client switches to another assigned App/service
+router.patch('/current-app', authMiddleware, async (req, res) => {
+  try {
+    const ownerId = getOwnerUserId(req.user);
+    const owner = await User.findById(ownerId);
+    if (req.user.parentUserId && req.user.source) {
+      return res.status(403).json({ error: 'This login is locked to one service.' });
+    }
+    if (!owner?.allowSourceSwitch) {
+      return res.status(403).json({ error: 'Switching services is not allowed for this client.' });
+    }
+
+    let app = null;
+    if (req.body.appId) {
+      app = await App.findById(req.body.appId);
+    } else if (req.body.source) {
+      app = await App.findByClientService(ownerId, req.body.source);
+    }
+    if (!app || String(app.clientId) !== String(ownerId) || !app.isActive) {
+      return res.status(404).json({ error: 'App not found for this client.' });
+    }
+
+    await App.setCurrent(ownerId, app._id);
+    const user = await User.findById(req.user._id);
+    const sub = await getAccountSubscription(user);
+    res.json({
+      currentAppId: app._id,
+      app,
+      user: {
+        ...user.toJSON(),
+        subscription: serializeSubscription(sub, user)
+      },
+      message: `Switched to ${app.service}`
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

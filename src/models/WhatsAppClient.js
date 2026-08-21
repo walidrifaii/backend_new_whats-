@@ -521,6 +521,8 @@ class WhatsAppClientModel {
        VALUES (?, ?, NOW())`,
       [String(id), String(userId)]
     );
+    const App = require('./App');
+    await App.assignToClient(userId, id);
     return this.findOne({ _id: id });
   }
 
@@ -529,6 +531,8 @@ class WhatsAppClientModel {
       `DELETE FROM phone_number_users WHERE phone_number_id = ? AND user_id = ?`,
       [String(id), String(userId)]
     );
+    const App = require('./App');
+    await App.deactivateForAssignment(userId, id);
     return this.findOne({ _id: id });
   }
 
@@ -537,6 +541,8 @@ class WhatsAppClientModel {
       `DELETE FROM phone_number_users WHERE phone_number_id = ?`,
       [String(id)]
     );
+    const App = require('./App');
+    await App.deactivateForAssignment(null, id);
     return this.findOne({ _id: id });
   }
 

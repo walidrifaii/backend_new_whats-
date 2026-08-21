@@ -1,13 +1,11 @@
 Project whatsapp_saas {
   database_type: "MySQL"
   Note: '''
-    Logic:
-    - One client can use many OTP numbers
-    - One OTP number can be used by many clients
-    - App is the link: client + number + service
-    - Client switches service by changing current_App_id
-    - Subscription (plan/credits) belongs to the client
-    - Sending uses App.balance and App.OTP_NUMBER_id
+    Super admin creates OTP_NUMBER (phone).
+    Super admin assigns that phone to one or many clients.
+    One phone → many clients. One client → many phones.
+    App is the assignment + service: client + phone + service name.
+    A client can have many Apps and switch with current_App_id.
   '''
 }
 
@@ -123,12 +121,12 @@ Table App {
   created_at datetime
 
   indexes {
-    (client_id, service) [unique, name: 'uq_app_client_service']
+    (client_id, OTP_NUMBER_id, service) [unique, name: 'uq_app_client_number_service']
     (OTP_NUMBER_id)
     (client_id)
   }
 
-  Note: "THE relation table. Many-to-many client <-> number, plus which service and its balance"
+  Note: "Assign phone to client here. Many phones × many clients. Client switches between App rows"
 }
 
 Table plan {

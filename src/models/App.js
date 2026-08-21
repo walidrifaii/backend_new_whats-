@@ -27,7 +27,7 @@ class AppModel {
         balance INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        UNIQUE KEY uq_apps_client_service (user_id, service),
+        UNIQUE KEY uq_apps_client_number_service (user_id, phone_number_id, service),
         KEY idx_apps_phone_number_id (phone_number_id),
         KEY idx_apps_user_id (user_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -51,7 +51,13 @@ class AppModel {
     await query(`UPDATE apps SET service = 'default' WHERE service IS NULL OR service = ''`);
 
     try {
-      await query('CREATE UNIQUE INDEX uq_apps_client_service ON apps (user_id, service)');
+      await query('ALTER TABLE apps DROP INDEX uq_apps_client_service');
+    } catch (_) {
+      /* old unique may not exist */
+    }
+
+    try {
+      await query('CREATE UNIQUE INDEX uq_apps_client_number_service ON apps (user_id, phone_number_id, service)');
     } catch (err) {
       if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
         throw err;
@@ -66,7 +72,21 @@ class AppModel {
       }
     }
 
+    await this.syncFromAssignments();
     await this.syncFromSources();
+  }
+
+  static async syncFromAssignments() {
+    const rows = await query(`
+      SELECT pnu.user_id, pnu.phone_number_id, pn.message_balance
+      FROM phone_number_users pnu
+      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
+    `);
+    for (const row of rows) {
+      await this.assignToClient(row.user_id, row.phone_number_id, {
+        balance: Number(row.message_balance) || 0
+      });
+    }
   }
 
   static async syncFromSources() {
@@ -112,18 +132,49 @@ class AppModel {
     return mapRow(rows[0]);
   }
 
-  static async upsert({ clientId, otpNumberId, service, isActive = true, balance } = {}) {
-    const name = normalizeMessageSource(service) || 'default';
-    if (!clientId) return null;
+  static async findByClientNumber(clientId, otpNumberId, service = 'whatsapp') {
+    const name = normalizeMessageSource(service) || 'whatsapp';
+    if (!clientId || !otpNumberId) return null;
+    const rows = await query(
+      `SELECT * FROM apps WHERE user_id = ? AND phone_number_id = ? AND service = ? LIMIT 1`,
+      [String(clientId), String(otpNumberId), name]
+    );
+    return mapRow(rows[0]);
+  }
 
-    const existing = await this.findByClientService(clientId, name);
+  static async assignToClient(clientId, otpNumberId, { service = 'whatsapp', balance, isActive = true } = {}) {
+    return this.upsert({
+      clientId,
+      otpNumberId,
+      service,
+      isActive,
+      balance
+    });
+  }
+
+  static async deactivateForAssignment(clientId, otpNumberId) {
+    if (!otpNumberId) return;
+    if (clientId) {
+      await query(
+        `UPDATE apps SET is_active = 0 WHERE user_id = ? AND phone_number_id = ?`,
+        [String(clientId), String(otpNumberId)]
+      );
+      return;
+    }
+    await query(
+      `UPDATE apps SET is_active = 0 WHERE phone_number_id = ?`,
+      [String(otpNumberId)]
+    );
+  }
+
+  static async upsert({ clientId, otpNumberId, service, isActive = true, balance } = {}) {
+    const name = normalizeMessageSource(service) || 'whatsapp';
+    if (!clientId || !otpNumberId) return null;
+
+    const existing = await this.findByClientNumber(clientId, otpNumberId, name);
     if (existing) {
       const sets = ['is_active = ?'];
       const values = [isActive ? 1 : 0];
-      if (otpNumberId) {
-        sets.push('phone_number_id = ?');
-        values.push(String(otpNumberId));
-      }
       if (balance !== undefined) {
         sets.push('balance = ?');
         values.push(Math.max(0, parseInt(balance, 10) || 0));
@@ -133,7 +184,6 @@ class AppModel {
       return this.findById(existing._id);
     }
 
-    if (!otpNumberId) return null;
     const id = generateObjectId();
     await query(
       `INSERT INTO apps (id, phone_number_id, user_id, service, is_active, balance, created_at)
