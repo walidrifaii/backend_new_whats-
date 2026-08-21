@@ -1,8 +1,30 @@
 const Plan = require('../models/Plan');
 const User = require('../models/User');
-const UserSource = require('../models/UserSource');
+const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { getOwnerUserId } = require('./accountScope');
 const { normalizeMessageSource } = require('./messageSource');
+
+const getAssignedNumbers = async (ownerId) => {
+  if (!ownerId) return [];
+  return WhatsAppClientModel.find({ userId: ownerId, isActive: true }, { sort: { createdAt: -1 } });
+};
+
+const planFromNumbers = async (numbers) => {
+  const plans = [];
+  for (const number of numbers) {
+    if (!number.planId || number.planStatus !== 'active') continue;
+    const plan = await Plan.findById(number.planId);
+    if (plan) plans.push({ number, plan });
+  }
+  const remaining = numbers.reduce((sum, item) => sum + (Number(item.messageBalance) || 0), 0);
+  const sourceLimit = plans.reduce((max, item) => Math.max(max, item.plan.sourceLimit || 0), 0);
+  const primary = plans[0] || null;
+  return {
+    plan: primary?.plan || null,
+    remaining,
+    sourceLimit
+  };
+};
 
 const getOwnerSubscription = async (userOrOwnerId) => {
   const ownerId = typeof userOrOwnerId === 'object'
@@ -23,22 +45,21 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const owner = typeof userOrOwnerId === 'object' && !userOrOwnerId.parentUserId
     ? userOrOwnerId
     : await User.findById(ownerId);
-  const plan = owner?.planId ? await Plan.findById(owner.planId) : null;
-  const sources = await UserSource.listByUser(ownerId);
-  const enabledSources = sources.filter((row) => row.enabled).map((row) => row.source);
-  const knownSources = await UserSource.listKnownNames(ownerId);
-  const status = owner?.planStatus || 'none';
+  const numbers = await getAssignedNumbers(ownerId);
+  const fromNumbers = await planFromNumbers(numbers);
+  const status = fromNumbers.plan ? 'active' : 'none';
 
   return {
     owner,
-    plan: status === 'active' ? plan : null,
-    requestedPlan: plan,
+    numbers,
+    plan: fromNumbers.plan,
+    requestedPlan: fromNumbers.plan,
     status,
-    sources,
-    enabledSources,
-    knownSources,
-    remaining: owner?.messageBalance ?? 0,
-    sourceLimit: plan?.sourceLimit || 0
+    sources: [],
+    enabledSources: [],
+    knownSources: [],
+    remaining: fromNumbers.remaining,
+    sourceLimit: fromNumbers.sourceLimit
   };
 };
 
@@ -56,25 +77,23 @@ const getAccountSubscription = async (userOrId) => {
 
   const fresh = await User.findById(user._id);
   const ownerSub = await getOwnerSubscription(user.parentUserId);
-  const plan = fresh?.planId ? await Plan.findById(fresh.planId) : null;
-  const status = fresh?.planStatus || 'none';
   return {
     owner: ownerSub.owner,
     billedUser: fresh,
-    plan: status === 'active' ? plan : null,
-    requestedPlan: plan,
-    status,
+    numbers: ownerSub.numbers,
+    plan: ownerSub.plan,
+    requestedPlan: ownerSub.requestedPlan,
+    status: ownerSub.status,
     sources: ownerSub.sources,
     enabledSources: ownerSub.enabledSources,
     knownSources: ownerSub.knownSources,
-    remaining: fresh?.messageBalance ?? 0,
+    remaining: ownerSub.remaining,
     sourceLimit: 0,
     sharesOwnerWhatsApp: true
   };
 };
 
 const serializeSubscription = (sub, user = null) => {
-  const currentSource = normalizeMessageSource(user?.source);
   const isService = Boolean(user?.parentUserId || sub.sharesOwnerWhatsApp);
   const sourceLimit = isService ? 0 : (sub.sourceLimit || sub.plan?.sourceLimit || 0);
   const mapPlan = (plan) => (
@@ -97,9 +116,7 @@ const serializeSubscription = (sub, user = null) => {
     sourceLimit,
     catalog: sub.enabledSources || [],
     sharesOwnerWhatsApp: isService,
-    currentSourceEnabled: currentSource
-      ? (sub.enabledSources || []).includes(currentSource)
-      : true
+    currentSourceEnabled: true
   };
 };
 
@@ -114,20 +131,22 @@ const assignPlanToUser = async (user, plan, { refillBalance = true } = {}) => {
   if (refillBalance) {
     await User.updateBalance(user._id, plan.messageQuota);
   }
-  if (!user.parentUserId) {
-    const enabledCount = await UserSource.countEnabled(user._id);
-    if (enabledCount > plan.sourceLimit) {
-      const sources = await UserSource.listByUser(user._id);
-      const enabled = sources.filter((row) => row.enabled);
-      for (const extra of enabled.slice(plan.sourceLimit)) {
-        await UserSource.upsert({ userId: user._id, source: extra.source, enabled: false });
-      }
-    }
-  }
   return getAccountSubscription(user._id);
 };
 
 const assignPlanToOwner = assignPlanToUser;
+
+const assignPlanToNumber = async (client, plan, { refillBalance = true } = {}) => {
+  if (!plan) {
+    await WhatsAppClientModel.setPlan(client._id, null, 'none');
+    return WhatsAppClientModel.findOne({ _id: client._id });
+  }
+  await WhatsAppClientModel.setPlan(client._id, plan._id, 'active');
+  if (refillBalance) {
+    await WhatsAppClientModel.updateBalance(client._id, plan.messageQuota);
+  }
+  return WhatsAppClientModel.findOne({ _id: client._id });
+};
 
 module.exports = {
   getOwnerSubscription,
@@ -135,5 +154,7 @@ module.exports = {
   serializeSubscription,
   assertSourceAllowed,
   assignPlanToUser,
-  assignPlanToOwner
+  assignPlanToOwner,
+  assignPlanToNumber,
+  getAssignedNumbers
 };

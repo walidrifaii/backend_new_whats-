@@ -11,7 +11,7 @@ const {
 const { normalizePhone } = require('../utils/helpers');
 const { resolveMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource, applySourceScope } = require('../utils/accountScope');
-const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
+const { requireNumberBalance, chargeNumberBalance } = require('../utils/messageBilling');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 const otpAuthMiddleware = require('../middleware/otpAuth');
 const authMiddleware = require('../middleware/auth');
@@ -39,9 +39,13 @@ const resolveOtpClient = async (clientIdParam, userId = null) => {
       ''
   ).trim();
 
-  const belongsToUser = (client) => {
-    if (!userId) return true;
-    return String(client.userId) === String(userId);
+  const belongsToUser = async (client) => {
+    if (!client) return false;
+    if (!userId) {
+      const ids = await WhatsAppClientModel.listAssignedUserIds(client._id);
+      return ids.length > 0;
+    }
+    return WhatsAppClientModel.isAssignedTo(client._id, userId);
   };
 
   if (explicit) {
@@ -50,14 +54,14 @@ const resolveOtpClient = async (clientIdParam, userId = null) => {
       isActive: true,
       status: 'connected'
     });
-    if (bySession && belongsToUser(bySession)) return bySession;
+    if (bySession && await belongsToUser(bySession)) return bySession;
 
     const byDbId = await WhatsAppClientModel.findOne({
       _id: explicit,
       isActive: true,
       status: 'connected'
     });
-    if (byDbId && belongsToUser(byDbId)) return byDbId;
+    if (byDbId && await belongsToUser(byDbId)) return byDbId;
     return null;
   }
 
@@ -126,18 +130,13 @@ router.post(
         });
       }
 
-      const sub = await getOwnerSubscription(dbClient.userId);
+      const sub = await getOwnerSubscription(ownerUserId);
       const sourceCheck = assertSourceAllowed(sub, source);
       if (!sourceCheck.ok) {
         return res.status(403).json({ ok: false, error: sourceCheck.error, source });
       }
 
-      let billedUser = await resolveBilledUser({
-        user: req.user || null,
-        ownerUserId: dbClient.userId,
-        source
-      });
-      const balanceCheck = await requireMessageBalance(billedUser, 1);
+      const balanceCheck = await requireNumberBalance(dbClient, 1);
       if (!balanceCheck.ok) {
         return res.status(403).json({
           ok: false,
@@ -160,7 +159,7 @@ router.post(
       const messageId = result?.id?._serialized || null;
 
       await MessageLog.create({
-        userId: dbClient.userId,
+        userId: ownerUserId,
         clientId: dbClient._id,
         phone,
         message: text,
@@ -171,9 +170,7 @@ router.post(
       });
 
       let remainingBalance = null;
-      if (billedUser) {
-        remainingBalance = await chargeMessageBalance(billedUser, 1);
-      }
+      remainingBalance = await chargeNumberBalance(dbClient, 1);
 
       console.log(`✅ OTP sent to ${phone} via ${sessionClientId}${source ? ` source=${source}` : ''}`);
 

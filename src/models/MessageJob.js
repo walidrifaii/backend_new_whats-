@@ -119,7 +119,7 @@ class MessageJobModel {
           FOREIGN KEY (user_id) REFERENCES users (id)
           ON DELETE CASCADE ON UPDATE CASCADE,
         CONSTRAINT fk_message_jobs_client
-          FOREIGN KEY (client_id) REFERENCES whatsapp_clients (id)
+          FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);

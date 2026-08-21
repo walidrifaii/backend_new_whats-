@@ -127,7 +127,7 @@ const processMessageJob = async (jobId) => {
       }
     }
 
-    const userBalance = await User.getBalance(job.userId);
+    const userBalance = await WhatsAppClientModel.getBalance(dbClient._id);
     if (userBalance <= 0) {
       console.log(`⛔ Bulk job ${jobId} stopped — insufficient message balance.`);
       const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
@@ -162,8 +162,8 @@ const processMessageJob = async (jobId) => {
     }
 
     if (success) {
-      await User.decrementBalance(job.userId, 1);
-      const updatedBalance = await User.getBalance(job.userId);
+      await WhatsAppClientModel.decrementBalance(dbClient._id, 1);
+      const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
       if (updatedBalance <= 0) {
         sendBalanceExhaustedEmail({
           userId: job.userId,

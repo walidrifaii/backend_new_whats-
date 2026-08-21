@@ -206,12 +206,7 @@ class UserModel {
     }
 
     const { normalizeMessageSource } = require('../utils/messageSource');
-    const sourceName = normalizeMessageSource(source);
-    if (!sourceName) {
-      const err = new Error('Source must be letters, numbers, dot, dash, or underscore');
-      err.status = 400;
-      throw err;
-    }
+    const sourceName = normalizeMessageSource(source) || null;
 
     const cleanEmail = String(email || '').trim().toLowerCase();
     const existingEmail = await this.findOne({ email: cleanEmail });
@@ -221,27 +216,12 @@ class UserModel {
       throw err;
     }
 
-    const existingSource = await this.findOne({ parentUserId: parent._id, source: sourceName });
-    if (existingSource) {
-      const err = new Error(`This account already has a login for source "${sourceName}"`);
-      err.status = 400;
-      throw err;
-    }
-
-    const { getOwnerSubscription } = require('../utils/subscription');
-    const UserSource = require('./UserSource');
-    const sub = await getOwnerSubscription(parent._id);
-    if (sub.status === 'active' && sub.plan) {
-      const alreadyEnabled = sub.enabledSources.includes(sourceName);
-      if (!alreadyEnabled && sub.enabledSources.length >= sub.plan.sourceLimit) {
-        const err = new Error(
-          `This ${sub.plan.name} plan allows ${sub.plan.sourceLimit} source(s). Enable a source in admin or upgrade the plan.`
-        );
+    if (sourceName) {
+      const existingSource = await this.findOne({ parentUserId: parent._id, source: sourceName });
+      if (existingSource) {
+        const err = new Error(`This account already has a login for source "${sourceName}"`);
         err.status = 400;
         throw err;
-      }
-      if (!alreadyEnabled) {
-        await UserSource.upsert({ userId: parent._id, source: sourceName, enabled: true });
       }
     }
 

@@ -18,9 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
   UNIQUE KEY uq_users_parent_source (parent_user_id, source)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS whatsapp_clients (
+CREATE TABLE IF NOT EXISTS phone_numbers (
   id CHAR(24) NOT NULL,
-  user_id CHAR(24) NOT NULL,
   name VARCHAR(160) NOT NULL,
   phone VARCHAR(40) NULL,
   client_id VARCHAR(190) NOT NULL,
@@ -31,12 +30,26 @@ CREATE TABLE IF NOT EXISTS whatsapp_clients (
   last_connected DATETIME NULL,
   messages_sent INT NOT NULL DEFAULT 0,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  plan_id CHAR(24) NULL,
+  plan_status VARCHAR(16) NOT NULL DEFAULT 'none',
+  message_balance INT NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_whatsapp_clients_client_id (client_id),
-  KEY idx_whatsapp_clients_user_id (user_id),
-  CONSTRAINT fk_whatsapp_clients_user
+  UNIQUE KEY uq_phone_numbers_client_id (client_id),
+  KEY idx_phone_numbers_plan_id (plan_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS phone_number_users (
+  phone_number_id CHAR(24) NOT NULL,
+  user_id CHAR(24) NOT NULL,
+  assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (phone_number_id, user_id),
+  KEY idx_phone_number_users_user_id (user_id),
+  CONSTRAINT fk_phone_number_users_number
+    FOREIGN KEY (phone_number_id) REFERENCES phone_numbers (id)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_phone_number_users_user
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -69,7 +82,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_campaigns_client
-    FOREIGN KEY (client_id) REFERENCES whatsapp_clients (id)
+    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -119,7 +132,7 @@ CREATE TABLE IF NOT EXISTS message_logs (
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_logs_client
-    FOREIGN KEY (client_id) REFERENCES whatsapp_clients (id)
+    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_logs_campaign
     FOREIGN KEY (campaign_id) REFERENCES campaigns (id)
@@ -157,7 +170,7 @@ CREATE TABLE IF NOT EXISTS message_jobs (
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_jobs_client
-    FOREIGN KEY (client_id) REFERENCES whatsapp_clients (id)
+    FOREIGN KEY (client_id) REFERENCES phone_numbers (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

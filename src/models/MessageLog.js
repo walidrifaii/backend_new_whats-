@@ -119,7 +119,7 @@ class MessageLogModel {
         wc.name AS client_name, wc.phone AS client_phone,
         c.name AS campaign_name
       FROM message_logs ml
-      LEFT JOIN whatsapp_clients wc ON wc.id = ml.client_id
+      LEFT JOIN phone_numbers wc ON wc.id = ml.client_id
       LEFT JOIN campaigns c ON c.id = ml.campaign_id
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;

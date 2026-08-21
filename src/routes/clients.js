@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
@@ -64,7 +63,7 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /api/clients - create new client
+// POST /api/clients - users cannot create WhatsApp; admin assigns from the pool
 router.post('/', authMiddleware, [
   body('name').trim().notEmpty().withMessage('Client name is required')
 ], async (req, res) => {
@@ -72,40 +71,9 @@ router.post('/', authMiddleware, [
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   if (rejectServiceAccountWrite(req, res)) return;
 
-  try {
-    const { name } = req.body;
-    const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-
-    const createdClient = await WhatsAppClientModel.create({
-      userId: req.user._id,
-      name,
-      clientId,
-      sessionPath: `./sessions/${clientId}`,
-      status: 'disconnected'
-    });
-
-    const client = await WhatsAppClientModel.findByIdAndUpdate(
-      createdClient._id,
-      { status: 'initializing' },
-      { new: true }
-    );
-
-    res.status(201).json({
-      client,
-      qrShare: buildQrSharePayload(req, client.clientId),
-      message: 'WhatsApp initialization started. Open the QR link and scan when ready.'
-    });
-
-    (async () => {
-      try {
-        await createWhatsAppClient(client.clientId);
-      } catch (err) {
-        console.error(`Init error for ${client.clientId}:`, err);
-      }
-    })();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  return res.status(403).json({
+    error: 'Only the super admin can add WhatsApp numbers. Ask admin to assign a number to your account.'
+  });
 });
 
 // POST /api/clients/:id/connect - initialize WhatsApp connection
@@ -114,7 +82,7 @@ router.post('/:id/connect', authMiddleware, async (req, res) => {
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
-      userId: req.user._id,
+      userId: getOwnerUserId(req.user),
       isActive: true
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
@@ -173,7 +141,7 @@ router.post('/:id/disconnect', authMiddleware, async (req, res) => {
   try {
     const client = await WhatsAppClientModel.findOne({
       _id: req.params.id,
-      userId: req.user._id
+      userId: getOwnerUserId(req.user)
     });
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
@@ -221,22 +189,12 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /api/clients/:id
+// DELETE /api/clients/:id — users cannot remove pool numbers
 router.delete('/:id', authMiddleware, async (req, res) => {
   if (rejectServiceAccountWrite(req, res)) return;
-  try {
-    const client = await WhatsAppClientModel.findOne({
-      _id: req.params.id,
-      userId: req.user._id
-    });
-    if (!client) return res.status(404).json({ error: 'Client not found' });
-
-    await destroyClient(client.clientId, { skipDisconnectEmail: true });
-    await WhatsAppClientModel.findByIdAndUpdate(client._id, { isActive: false });
-    res.json({ message: 'Client deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  return res.status(403).json({
+    error: 'Only the super admin can remove WhatsApp numbers.'
+  });
 });
 
 module.exports = router;

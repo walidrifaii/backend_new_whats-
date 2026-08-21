@@ -1,4 +1,3 @@
-const User = require('../models/User');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { getTransporter } = require('../utils/smtp');
 
@@ -38,11 +37,16 @@ const getNotifyRecipients = async (dbClient) => {
   const sendToOwner =
     String(process.env.WHATSAPP_DISCONNECT_EMAIL_TO_OWNER || 'false').toLowerCase() === 'true';
 
-  const user = await User.findById(dbClient.userId);
+  const assignedUsers = await WhatsAppClientModel.listAssignedUsers(dbClient._id);
+  const user = assignedUsers[0] || null;
   const recipients = new Set();
 
   if (adminEmail) recipients.add(adminEmail);
-  if (sendToOwner && user?.email) recipients.add(String(user.email).trim());
+  if (sendToOwner) {
+    assignedUsers.forEach((item) => {
+      if (item?.email) recipients.add(String(item.email).trim());
+    });
+  }
 
   if (recipients.size === 0 && user?.email) {
     recipients.add(String(user.email).trim());
@@ -51,7 +55,7 @@ const getNotifyRecipients = async (dbClient) => {
   return {
     emails: [...recipients],
     user,
-    ownerEmail: user?.email || null
+    ownerEmail: assignedUsers.map((item) => item.email).filter(Boolean).join(', ') || null
   };
 };
 
@@ -80,7 +84,7 @@ const sendWhatsAppDisconnectedEmail = async ({
     return { ok: false, reason: 'missing_notify_email' };
   }
 
-  const notifyCheck = shouldNotify(dbClient.userId, clientId);
+  const notifyCheck = shouldNotify(user?._id || 'pool', clientId);
   if (!notifyCheck.ok) {
     return { ok: false, reason: notifyCheck.reason };
   }

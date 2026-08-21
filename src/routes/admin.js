@@ -5,14 +5,13 @@ const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
-const UserSource = require('../models/UserSource');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const TokenSession = require('../models/TokenSession');
 const { query } = require('../db/mysql');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { createWhatsAppClient, isClientConnected } = require('../services/whatsappManager');
-const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser } = require('../utils/subscription');
+const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser, assignPlanToNumber } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { buildQrSharePayload } = require('../utils/qrShare');
 
@@ -68,7 +67,7 @@ const buildCredentialsPayload = async (req, user) => {
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
     primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient._id}` : 'WHATSAPP_NODE_CLIENT_ID=',
-    source ? `WHATSAPP_NODE_SOURCE=${source}` : null
+    source ? `WHATSAPP_NODE_SOURCE=${source}` : '# WHATSAPP_NODE_SOURCE=  # optional, stats only'
   ].filter(Boolean);
 
   return {
@@ -88,6 +87,7 @@ const buildCredentialsPayload = async (req, user) => {
     apiBaseUrl,
     otpUrl: apiBaseUrl ? `${apiBaseUrl}/otp/send` : '',
     source: source || null,
+    sourceOptional: true,
     sharesOwnerWhatsApp: Boolean(user.parentUserId),
     clients: clients.map((item) => ({
       _id: item._id,
@@ -100,7 +100,233 @@ const buildCredentialsPayload = async (req, user) => {
   };
 };
 
+const serializeNumber = async (client, assignedUsers = null) => {
+  const plan = client.planId ? await Plan.findById(client.planId) : null;
+  const users = assignedUsers || await WhatsAppClientModel.listAssignedUsers(client._id);
+  return {
+    _id: client._id,
+    name: client.name,
+    phone: client.phone || null,
+    clientId: client.clientId,
+    status: client.status,
+    qrCode: client.qrCode || null,
+    isActive: client.isActive,
+    userIds: users.map((item) => item._id),
+    planId: client.planId || null,
+    planStatus: client.planStatus || 'none',
+    messageBalance: client.messageBalance ?? 0,
+    createdAt: client.createdAt,
+    plan: plan
+      ? {
+          _id: plan._id,
+          name: plan.name,
+          slug: plan.slug,
+          messageQuota: plan.messageQuota,
+          sourceLimit: plan.sourceLimit
+        }
+      : null,
+    assignedUsers: users
+  };
+};
+
 router.use(authMiddleware, adminMiddleware);
+
+// GET /api/admin/numbers — WhatsApp number pool
+router.get('/numbers', async (_req, res) => {
+  try {
+    const clients = await WhatsAppClientModel.find({ isActive: true }, { sort: { createdAt: -1 } });
+    const assignedByNumber = await WhatsAppClientModel.listAssignedUsersByNumberIds(
+      clients.map((item) => item._id)
+    );
+    const numbers = [];
+    for (const client of clients) {
+      numbers.push(await serializeNumber(client, assignedByNumber[client._id] || []));
+    }
+    const users = await User.findAll();
+    const assignableUsers = users
+      .filter((u) => !u.parentUserId && u.role !== 'admin')
+      .map((u) => ({ _id: u._id, name: u.name, email: u.email }));
+    const plans = await Plan.findAll({ activeOnly: true });
+    res.json({ numbers, users: assignableUsers, plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/numbers — create WhatsApp in the pool (no user)
+router.post('/numbers', [
+  body('name').trim().notEmpty().withMessage('Number name is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+    const createdClient = await WhatsAppClientModel.create({
+      userId: null,
+      name: req.body.name,
+      clientId,
+      sessionPath: `./sessions/${clientId}`,
+      status: 'disconnected'
+    });
+
+    const client = await WhatsAppClientModel.findByIdAndUpdate(
+      createdClient._id,
+      { status: 'initializing' },
+      { new: true }
+    );
+
+    res.status(201).json({
+      number: await serializeNumber(client),
+      qrShare: buildQrSharePayload(req, client.clientId),
+      message: 'Number created with no user. Open Share QR and scan, then assign a plan and users.'
+    });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(client.clientId);
+      } catch (err) {
+        console.error(`Admin pool init error for ${client.clientId}:`, err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/numbers/:id/plan — Mini / Medium / Max on the number
+router.patch('/numbers/:id/plan', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({ _id: req.params.id, isActive: true });
+    if (!client) return res.status(404).json({ error: 'Number not found' });
+
+    const planId = req.body.planId ? String(req.body.planId) : '';
+    if (!planId) {
+      const updated = await assignPlanToNumber(client, null, { refillBalance: false });
+      return res.json({
+        number: await serializeNumber(updated),
+        message: 'Plan removed from this number'
+      });
+    }
+
+    const plan = await Plan.findById(planId);
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+    const refillBalance = req.body.refillBalance !== false;
+    const updated = await assignPlanToNumber(client, plan, { refillBalance });
+    res.json({
+      number: await serializeNumber(updated),
+      message: `Assigned ${plan.name} (${plan.messageQuota} messages) to this number`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/numbers/:id/assign — add, remove, or clear users on a number
+router.patch('/numbers/:id/assign', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({ _id: req.params.id, isActive: true });
+    if (!client) return res.status(404).json({ error: 'Number not found' });
+
+    const action = String(req.body.action || '').trim().toLowerCase();
+    const rawUserId = req.body.userId;
+    const nextUserId = rawUserId == null || rawUserId === '' ? null : String(rawUserId);
+
+    if (action === 'remove') {
+      if (!nextUserId) return res.status(400).json({ error: 'userId is required to remove a user' });
+      const updated = await WhatsAppClientModel.removeUser(client._id, nextUserId);
+      return res.json({
+        number: await serializeNumber(updated),
+        message: 'User removed from this number'
+      });
+    }
+
+    if (!nextUserId) {
+      const updated = await WhatsAppClientModel.clearUsers(client._id);
+      return res.json({
+        number: await serializeNumber(updated),
+        message: 'Number returned to the pool'
+      });
+    }
+
+    const user = await User.findById(nextUserId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.parentUserId) {
+      return res.status(400).json({ error: 'Assign numbers to the owner account, not a service login.' });
+    }
+
+    const updated = await WhatsAppClientModel.addUser(client._id, nextUserId);
+    res.json({
+      number: await serializeNumber(updated),
+      message: 'Number assigned to user'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/admin/numbers/:id/balance — set or add messages on the number
+router.patch('/numbers/:id/balance', [
+  body('balance').optional().isInt({ min: 0 }),
+  body('amount').optional().isInt({ min: 1 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const client = await WhatsAppClientModel.findOne({ _id: req.params.id, isActive: true });
+    if (!client) return res.status(404).json({ error: 'Number not found' });
+
+    let nextBalance = client.messageBalance ?? 0;
+    if (req.body.balance !== undefined) {
+      nextBalance = parseInt(req.body.balance, 10);
+    } else if (req.body.amount !== undefined) {
+      nextBalance = nextBalance + parseInt(req.body.amount, 10);
+    } else {
+      return res.status(400).json({ error: 'Provide balance or amount' });
+    }
+
+    const updated = await WhatsAppClientModel.updateBalance(client._id, nextBalance);
+    res.json({
+      number: await serializeNumber(updated),
+      message: `Number balance set to ${updated.messageBalance}`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users — create an owner account
+router.post('/users', [
+  body('name').trim().notEmpty().withMessage('Name is required'),
+  body('email').isEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const email = String(req.body.email).trim().toLowerCase();
+    const existing = await User.findOne({ email });
+    if (existing) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    const user = await User.create({
+      name: req.body.name,
+      email,
+      password: req.body.password,
+      role: 'user'
+    });
+
+    res.status(201).json({
+      user: user.toJSON(),
+      message: 'User created. Assign a WhatsApp number from Numbers.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET /api/admin/users — list all users with message stats
 router.get('/users', async (req, res) => {
@@ -149,8 +375,9 @@ router.get('/users', async (req, res) => {
 
     const clientCounts = await query(`
       SELECT user_id, COUNT(*) AS count
-      FROM whatsapp_clients
-      WHERE is_active = 1
+      FROM phone_number_users pnu
+      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
+      WHERE pn.is_active = 1
       GROUP BY user_id
     `);
     const clientMap = {};
@@ -159,19 +386,29 @@ router.get('/users', async (req, res) => {
     }
 
     const clientPhones = await query(`
-      SELECT user_id, phone, name, status
-      FROM whatsapp_clients
-      WHERE is_active = 1
-        AND phone IS NOT NULL
-        AND TRIM(phone) <> ''
-      ORDER BY (status = 'connected') DESC, created_at DESC
+      SELECT pnu.user_id, pn.phone, pn.name, pn.status, pn.plan_id, pn.plan_status, pn.message_balance, pn.id
+      FROM phone_number_users pnu
+      INNER JOIN phone_numbers pn ON pn.id = pnu.phone_number_id
+      WHERE pn.is_active = 1
+      ORDER BY (pn.status = 'connected') DESC, pn.created_at DESC
     `);
     const phonesMap = {};
+    const numbersMap = {};
     for (const row of clientPhones) {
       const ownerId = String(row.user_id);
       if (!phonesMap[ownerId]) phonesMap[ownerId] = [];
+      if (!numbersMap[ownerId]) numbersMap[ownerId] = [];
+      numbersMap[ownerId].push({
+        _id: row.id,
+        phone: row.phone || '',
+        name: row.name || '',
+        status: row.status || '',
+        planId: row.plan_id || null,
+        planStatus: row.plan_status || 'none',
+        messageBalance: row.message_balance ?? 0
+      });
       const phone = String(row.phone || '').trim();
-      if (phonesMap[ownerId].some((item) => item.phone === phone)) continue;
+      if (!phone || phonesMap[ownerId].some((item) => item.phone === phone)) continue;
       phonesMap[ownerId].push({
         phone,
         name: row.name || '',
@@ -197,26 +434,26 @@ router.get('/users', async (req, res) => {
         safe.clientCount = clientMap[u._id] || 0;
       }
       safe.phones = phonesMap[ownerId] || [];
+      safe.assignedNumbers = numbersMap[ownerId] || [];
+      safe.messageBalance = (numbersMap[ownerId] || []).reduce(
+        (sum, item) => sum + (Number(item.messageBalance) || 0),
+        0
+      );
       return safe;
     });
 
-    const ownerIds = [...new Set(result.map((u) => u.parentUserId || u._id))];
     const plans = await Plan.findAll();
     const plansById = new Map(plans.map((p) => [p._id, p]));
-    const sourcesByOwner = {};
-    for (const ownerId of ownerIds) {
-      if (!ownerId) continue;
-      sourcesByOwner[ownerId] = await UserSource.listByUser(ownerId);
-    }
     for (const row of result) {
       const ownerId = row.parentUserId || row._id;
       const plan = plansById.get(row.planId);
-      const ownerSources = sourcesByOwner[ownerId] || [];
-      row.plan = plan || null;
-      row.enabledSources = ownerSources
-        .filter((item) => item.enabled)
-        .map((item) => item.source);
-      row.sourceCatalog = ownerSources.map((item) => item.source);
+      const assigned = numbersMap[ownerId] || [];
+      const numberPlan = assigned
+        .map((item) => plansById.get(item.planId))
+        .find(Boolean) || null;
+      row.plan = numberPlan || plan || null;
+      row.enabledSources = [];
+      row.sourceCatalog = [];
     }
 
     res.json({ users: result, plans });
@@ -296,7 +533,7 @@ router.post('/users/:id/service-accounts', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('source').trim().notEmpty().withMessage('Source is required'),
+  body('source').optional({ checkFalsy: true }).trim(),
   body('messageBalance').optional().isInt({ min: 0 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -320,7 +557,9 @@ router.post('/users/:id/service-accounts', [
 
     res.status(201).json({
       user: user.toJSON(),
-      message: `Service login created for source "${user.source}". They share this owner's WhatsApp.`
+      message: user.source
+        ? `Service login created for source "${user.source}". They share this owner's WhatsApp.`
+        : 'Service login created. They share this owner\'s WhatsApp.'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -414,64 +653,15 @@ router.patch('/users/:id/plan', async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:id/sources — enable sources up to the plan limit
-router.patch('/users/:id/sources', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    const ownerId = user.parentUserId || user._id;
-    const owner = user.parentUserId ? await User.findById(user.parentUserId) : user;
-    const sub = await getOwnerSubscription(ownerId);
-    const wanted = (Array.isArray(req.body.sources) ? req.body.sources : [])
-      .map((item) => normalizeMessageSource(item))
-      .filter(Boolean);
-    const toRemove = [...new Set(
-      (Array.isArray(req.body.remove) ? req.body.remove : [])
-        .map((item) => normalizeMessageSource(item))
-        .filter(Boolean)
-    )];
-
-    for (const name of toRemove) {
-      const locked = await User.findOne({ parentUserId: ownerId, source: name });
-      if (locked) {
-        return res.status(400).json({
-          error: `Cannot delete "${name}" while ${locked.email} is locked to it. Use Allow switch first.`
-        });
-      }
-    }
-
-    const limit = sub.plan?.sourceLimit || (sub.status === 'active' ? 1 : wanted.length);
-    if (sub.status === 'active' && wanted.length > limit) {
-      return res.status(400).json({
-        error: `${sub.plan?.name || 'This'} plan allows ${limit} source(s). Disable one before enabling another.`
-      });
-    }
-
-    if (toRemove.length) {
-      await UserSource.remove(ownerId, toRemove);
-    }
-    const sources = await UserSource.setEnabledSources(ownerId, wanted.filter((name) => !toRemove.includes(name)));
-    const next = await getOwnerSubscription(ownerId);
-    res.json({
-      sources,
-      enabledSources: next.enabledSources,
-      subscription: serializeSubscription(next, owner),
-      message: 'Sources updated'
-    });
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
 // PATCH /api/admin/users/:id/source-lock
-// null source = this email can switch among the owner's enabled sources
+// null source = this email can switch; set source to lock this login to one Laravel app tag
 router.patch('/users/:id/source-lock', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.parentUserId) {
       return res.status(400).json({
-        error: 'The owner already switches from /stats. Enable sources on this owner with Sources.'
+        error: 'The owner already uses the assigned WhatsApp. Lock source only on a service login.'
       });
     }
 
@@ -491,15 +681,11 @@ router.patch('/users/:id/source-lock', async (req, res) => {
     }
 
     const updated = await User.setLockedSource(user._id, lockTo);
-    const next = await getOwnerSubscription(user.parentUserId);
     res.json({
       user: updated.toJSON(),
-      enabledSources: next.enabledSources,
       message: lockTo
         ? `This login is locked to ${lockTo} and cannot switch.`
-        : (next.enabledSources.length >= 2
-          ? `This email can switch sources. Enabled: ${next.enabledSources.join(', ')}.`
-          : 'Source lock removed. Enable at least 2 real sources on the owner so they can switch.')
+        : 'Source lock removed. This login can send without a locked source.'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -544,11 +730,11 @@ router.post('/users/:id/clients', [
 
     const clientId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
     const createdClient = await WhatsAppClientModel.create({
-      userId: owner._id,
       name: req.body.name,
       clientId,
       sessionPath: `./sessions/${clientId}`,
-      status: 'disconnected'
+      status: 'disconnected',
+      userId: owner._id
     });
 
     const client = await WhatsAppClientModel.findByIdAndUpdate(
@@ -675,8 +861,8 @@ router.get('/stats', async (req, res) => {
   try {
     const [userCount] = await query(`SELECT COUNT(*) AS count FROM users`);
     const [activeUsers] = await query(`SELECT COUNT(*) AS count FROM users WHERE is_active = 1`);
-    const [clientCount] = await query(`SELECT COUNT(*) AS count FROM whatsapp_clients WHERE is_active = 1`);
-    const [connectedClients] = await query(`SELECT COUNT(*) AS count FROM whatsapp_clients WHERE status = 'connected' AND is_active = 1`);
+    const [clientCount] = await query(`SELECT COUNT(*) AS count FROM phone_numbers WHERE is_active = 1`);
+    const [connectedClients] = await query(`SELECT COUNT(*) AS count FROM phone_numbers WHERE status = 'connected' AND is_active = 1`);
     const [messageStats] = await query(`
       SELECT
         COUNT(*) AS total,

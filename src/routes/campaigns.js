@@ -11,7 +11,7 @@ const authMiddleware = require('../middleware/auth');
 const { resolveMediaUrlForDb, resolveMediaTypeForDb } = require('../utils/campaignMedia');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
-const { resolveBilledUser, requireMessageBalance } = require('../utils/messageBilling');
+const { requireNumberBalance } = require('../utils/messageBilling');
 
 const formatCampaign = (campaign, client = null) => {
   if (!campaign) return campaign;
@@ -179,13 +179,8 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'No contacts uploaded for this campaign' });
     }
 
-    const billedUser = await resolveBilledUser({
-      user: req.user,
-      ownerUserId: getOwnerUserId(req.user),
-      source: getLockedSource(req.user) || campaign.source
-    });
-    if (!shouldSkipBalanceForCampaign(campaign, billedUser)) {
-      const balanceCheck = await requireMessageBalance(billedUser, 1);
+    if (!shouldSkipBalanceForCampaign(campaign, req.user)) {
+      const balanceCheck = await requireNumberBalance(client, 1);
       if (!balanceCheck.ok) {
         const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
         const pendingRows = await query(
@@ -208,18 +203,18 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
         }
 
         sendBalanceExhaustedEmail({
-          userId: billedUser?._id || req.user._id,
-          email: billedUser?.email || req.user.email,
-          name: billedUser?.name || req.user.name
+          userId: getOwnerUserId(req.user),
+          email: req.user.email,
+          name: req.user.name
         })
           .then((result) => {
             console.log(
-              `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${billedUser?.email || req.user.email || 'n/a'}`
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=${result?.ok ? 'true' : 'false'} reason=${result?.reason || 'unknown'} email=${req.user.email || 'n/a'}`
             );
           })
           .catch((err) => {
             console.log(
-              `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${billedUser?.email || req.user.email || 'n/a'}`
+              `[BALANCE_EMAIL] context=campaign_start_blocked ok=false reason=${err.message || 'unknown'} email=${req.user.email || 'n/a'}`
             );
           });
         return res.status(403).json({

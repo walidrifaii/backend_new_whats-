@@ -276,7 +276,7 @@ router.post('/service-accounts', authMiddleware, [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('source').trim().notEmpty().withMessage('Source is required'),
+  body('source').optional({ checkFalsy: true }).trim(),
   body('messageBalance').optional().isInt({ min: 0 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -297,7 +297,9 @@ router.post('/service-accounts', authMiddleware, [
     });
     res.status(201).json({
       user: user.toJSON(),
-      message: `Created ${user.source} login. They sign in at /stats-login and only see ${user.source} messages.`
+      message: user.source
+        ? `Created ${user.source} login. They sign in at /stats-login.`
+        : 'Service login created. They sign in at /stats-login.'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

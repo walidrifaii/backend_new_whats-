@@ -11,7 +11,6 @@ const { sendMessage, isClientConnected, waitForClientReady } = require('./whatsa
 const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
-const { resolveBilledUser } = require('../utils/messageBilling');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 
 const logBalanceEmailResult = (context, result, email) => {
@@ -130,21 +129,16 @@ const processCampaign = async (campaignId) => {
   const dbClient = await WhatsAppClientModel.findOne({ _id: campaign.clientId, isActive: true });
   if (!dbClient) return;
   const clientId = dbClient.clientId;
-  const campaignOwner = await User.findById(dbClient.userId);
-  const billedUser = await resolveBilledUser({
-    user: campaignOwner,
-    ownerUserId: dbClient.userId,
-    source: campaign.source
-  });
-  const sub = await getOwnerSubscription(dbClient.userId);
+  const campaignOwner = await User.findById(campaign.userId);
+  const sub = await getOwnerSubscription(campaign.userId);
   const sourceCheck = assertSourceAllowed(sub, campaign.source);
   if (!sourceCheck.ok) {
     await failPendingContacts(campaignId, sourceCheck.error);
     campaignQueues.delete(campaignId.toString());
     return;
   }
-  const skipBalance = shouldSkipBalanceForCampaign(campaign, billedUser);
-  const notifyUser = billedUser || campaignOwner;
+  const skipBalance = shouldSkipBalanceForCampaign(campaign, campaignOwner);
+  const notifyUser = campaignOwner;
 
   console.log(`🚀 Starting campaign ${campaignId} via client ${clientId}`);
 
@@ -201,7 +195,7 @@ const processCampaign = async (campaignId) => {
 
       // Check message balance before sending (OTP campaigns skip unless they map to a service account)
       if (!skipBalance) {
-        const userBalance = await User.getBalance((billedUser || campaignOwner)._id);
+        const userBalance = await WhatsAppClientModel.getBalance(dbClient._id);
         if (userBalance <= 0) {
           console.log(`⛔ Campaign ${campaignId} stopped — insufficient message balance.`);
           const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
@@ -257,17 +251,17 @@ const processCampaign = async (campaignId) => {
         console.error(`❌ Failed to send to ${phone}:`, err.message);
       }
 
-      if (success && !skipBalance && billedUser) {
-        await User.decrementBalance(billedUser._id, 1);
-        const updatedBalance = await User.getBalance(billedUser._id);
+      if (success && !skipBalance) {
+        await WhatsAppClientModel.decrementBalance(dbClient._id, 1);
+        const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
         if (updatedBalance <= 0) {
           sendBalanceExhaustedEmail({
-            userId: billedUser._id,
-            email: billedUser.email,
-            name: billedUser.name
+            userId: notifyUser?._id,
+            email: notifyUser?.email,
+            name: notifyUser?.name
           })
-            .then((result) => logBalanceEmailResult('campaign_reached_zero', result, billedUser.email))
-            .catch((err) => logBalanceEmailResult('campaign_reached_zero', { ok: false, reason: err.message }, billedUser.email));
+            .then((result) => logBalanceEmailResult('campaign_reached_zero', result, notifyUser?.email))
+            .catch((err) => logBalanceEmailResult('campaign_reached_zero', { ok: false, reason: err.message }, notifyUser?.email));
         }
       }
 
@@ -280,7 +274,7 @@ const processCampaign = async (campaignId) => {
 
       // Create log entry
       await MessageLog.create({
-        userId: dbClient.userId,
+        userId: campaign.userId,
         clientId: dbClient._id,
         campaignId,
         contactId: contact._id,

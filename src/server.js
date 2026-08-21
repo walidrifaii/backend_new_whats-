@@ -4,7 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
-const { testConnection } = require('./db/mysql');
+const { testConnection, query } = require('./db/mysql');
 
 const authRoutes     = require('./routes/auth');
 const clientRoutes   = require('./routes/clients');
@@ -18,7 +18,6 @@ const adminRoutes    = require('./routes/admin');
 const TokenSession        = require('./models/TokenSession');
 const User                = require('./models/User');
 const Plan                = require('./models/Plan');
-const UserSource          = require('./models/UserSource');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
 const Campaign            = require('./models/Campaign');
 const MessageLog          = require('./models/MessageLog');
@@ -91,7 +90,7 @@ app.get('/api/health', (_req, res) => {
       jwtAuthAvailable: jwtAuth,
       endpoint: 'POST /api/otp/send',
       statsEndpoint: 'GET /api/otp/stats',
-      source: 'Pass source in JSON body or header X-Service-Name so each Laravel app can be counted separately',
+      source: 'Source is optional. Send it in JSON body or header X-Service-Name only if you want stats split by Laravel app. Billing uses the assigned number plan.',
       auth: [
         ...(jwtAuth ? ['Authorization: Bearer <WHATSAPP_NODE_TOKEN>'] : []),
         ...(serviceKey ? ['X-Service-Key: <OTP_SERVICE_SECRET>'] : [])
@@ -226,8 +225,13 @@ testConnection()
     await TokenSession.init();
     await User.ensureAuthTokenColumn();
     await Plan.ensureTable();
-    await UserSource.ensureTable();
+    await WhatsAppClientModel.ensurePoolColumns();
     await MessageJob.ensureTables();
+    try {
+      await query('DROP TABLE IF EXISTS user_sources');
+    } catch (err) {
+      console.warn('Could not drop unused user_sources table:', err.message);
+    }
     await MessageLog.ensureSourceColumn();
     await Campaign.ensureSourceColumn();
     console.log('✅ MySQL connected');

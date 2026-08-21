@@ -1,15 +1,15 @@
+const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
 const { normalizeMessageSource } = require('./messageSource');
 
 const hasActivePlan = (account) => Boolean(account?.planStatus === 'active' && account.planId);
 
 /**
- * Who pays for a send:
+ * Who pays for a send (legacy user-plan path, kept for old rows):
  * 1. Source/service login with its own active plan
  * 2. Owner with an active plan
  * 3. Matching source login (extra balance)
  * 4. Logged-in user / owner
- * WhatsApp always stays on the owner.
  */
 const resolveBilledUser = async ({ user = null, ownerUserId = null, source = null } = {}) => {
   const parentId = ownerUserId || (user?.parentUserId ? user.parentUserId : (user && !user.parentUserId ? user._id : null));
@@ -61,8 +61,35 @@ const chargeMessageBalance = async (billedUser, amount = 1) => {
   return User.getBalance(billedUser._id);
 };
 
+const requireNumberBalance = async (dbClient, required = 1) => {
+  if (!dbClient) {
+    return { ok: true, balance: null, billedClient: null };
+  }
+  const fresh = await WhatsAppClientModel.findOne({ _id: dbClient._id });
+  const balance = Number(fresh?.messageBalance ?? dbClient.messageBalance ?? 0);
+  if (balance < required) {
+    return {
+      ok: false,
+      balance,
+      billedClient: fresh || dbClient,
+      error: 'You need to charge balance in message.',
+      balanceExhausted: true,
+      currentBalance: balance,
+      required
+    };
+  }
+  return { ok: true, balance, billedClient: fresh || dbClient };
+};
+
+const chargeNumberBalance = async (dbClient, amount = 1) => {
+  if (!dbClient) return null;
+  return WhatsAppClientModel.decrementBalance(dbClient._id, amount);
+};
+
 module.exports = {
   resolveBilledUser,
   requireMessageBalance,
-  chargeMessageBalance
+  chargeMessageBalance,
+  requireNumberBalance,
+  chargeNumberBalance
 };

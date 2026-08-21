@@ -4,7 +4,6 @@ const MessageLog = require('../models/MessageLog');
 const MessageJob = require('../models/MessageJob');
 const MessageJobItem = require('../models/MessageJobItem');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const User = require('../models/User');
 const { sendMessage, isClientConnected, waitForClientReady } = require('../services/whatsappManager');
 const { startMessageJob, isClientSending } = require('../services/messageJobQueue');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
@@ -19,7 +18,7 @@ const {
 const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
 const { resolveMessageSource } = require('../utils/messageSource');
-const { resolveBilledUser, requireMessageBalance, chargeMessageBalance } = require('../utils/messageBilling');
+const { requireNumberBalance, chargeNumberBalance } = require('../utils/messageBilling');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
@@ -158,12 +157,12 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     if (!sourceCheck.ok) {
       return res.status(403).json({ error: sourceCheck.error });
     }
-    const billedUser = await resolveBilledUser({
-      user: req.user,
-      ownerUserId: getOwnerUserId(req.user),
-      source
-    });
-    const balanceCheck = await requireMessageBalance(billedUser, phoneList.length);
+
+    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
+    if (!dbClient) {
+      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
+    }
+    const balanceCheck = await requireNumberBalance(dbClient, phoneList.length);
     if (!balanceCheck.ok) {
       return res.status(403).json({
         error: balanceCheck.error || 'Insufficient message balance for this bulk job.',
@@ -171,11 +170,6 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
         currentBalance: balanceCheck.currentBalance || 0,
         required: phoneList.length
       });
-    }
-
-    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
-    if (!dbClient) {
-      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
     if (dbClient.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
@@ -212,7 +206,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     const scheduledItems = buildItemSchedule(phoneList, schedule.delayBetweenMessagesMs, startAt);
 
     const job = await MessageJob.create({
-      userId: billedUser?._id || req.user._id,
+      userId: getOwnerUserId(req.user),
       clientId: dbClient._id,
       message: text,
       mediaUrl,
@@ -227,7 +221,7 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     await MessageJobItem.insertMany(
       scheduledItems.map((row) => ({
         jobId: job._id,
-        userId: billedUser?._id || req.user._id,
+        userId: getOwnerUserId(req.user),
         phone: row.phone,
         status: 'pending',
         scheduledAt: row.scheduledAt
@@ -333,30 +327,25 @@ router.post('/send', authMiddleware, async (req, res) => {
     if (!sourceCheck.ok) {
       return res.status(403).json({ error: sourceCheck.error });
     }
-    const billedUser = await resolveBilledUser({
-      user: req.user,
-      ownerUserId: getOwnerUserId(req.user),
-      source
-    });
-    const balanceCheck = await requireMessageBalance(billedUser, 1);
+
+    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
+    if (!dbClient) {
+      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
+    }
+    const balanceCheck = await requireNumberBalance(dbClient, 1);
     if (!balanceCheck.ok) {
       sendBalanceExhaustedEmail({
-        userId: billedUser?._id || req.user._id,
-        email: billedUser?.email || req.user.email,
-        name: billedUser?.name || req.user.name
+        userId: getOwnerUserId(req.user),
+        email: req.user.email,
+        name: req.user.name
       })
-        .then((result) => logBalanceEmailResult('single_send_blocked', result, billedUser?.email || req.user.email))
-        .catch((err) => logBalanceEmailResult('single_send_blocked', { ok: false, reason: err.message }, billedUser?.email || req.user.email));
+        .then((result) => logBalanceEmailResult('single_send_blocked', result, req.user.email))
+        .catch((err) => logBalanceEmailResult('single_send_blocked', { ok: false, reason: err.message }, req.user.email));
       return res.status(403).json({
         error: balanceCheck.error,
         balanceExhausted: true,
         currentBalance: balanceCheck.currentBalance || 0
       });
-    }
-
-    const dbClient = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
-    if (!dbClient) {
-      return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
     if (dbClient.status !== 'connected') {
       return res.status(400).json({ error: 'WhatsApp client is not connected' });
@@ -380,16 +369,16 @@ router.post('/send', authMiddleware, async (req, res) => {
       sendOpts
     );
 
-    await chargeMessageBalance(billedUser, 1);
-    const updatedBalance = billedUser ? await User.getBalance(billedUser._id) : null;
+    await chargeNumberBalance(dbClient, 1);
+    const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
     if (updatedBalance !== null && updatedBalance <= 0) {
       sendBalanceExhaustedEmail({
-        userId: billedUser._id,
-        email: billedUser.email,
-        name: billedUser.name
+        userId: getOwnerUserId(req.user),
+        email: req.user.email,
+        name: req.user.name
       })
-        .then((result) => logBalanceEmailResult('single_send_reached_zero', result, billedUser.email))
-        .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, billedUser.email));
+        .then((result) => logBalanceEmailResult('single_send_reached_zero', result, req.user.email))
+        .catch((err) => logBalanceEmailResult('single_send_reached_zero', { ok: false, reason: err.message }, req.user.email));
     }
 
     const logText =

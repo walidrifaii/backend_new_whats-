@@ -574,8 +574,11 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
       const captionText = typeof msg?._data?.caption === 'string' ? msg._data.caption.trim() : '';
       const messageType = msg?.type || (msg?.hasMedia ? 'media' : 'unknown');
       const logText     = bodyText || captionText || `[${messageType}]`;
+      const assignedIds = await WhatsAppClientModel.listAssignedUserIds(dbClient._id);
+      const logUserId = assignedIds[0];
+      if (!logUserId) return;
       await MessageLog.create({
-        userId: dbClient.userId, clientId: dbClient._id,
+        userId: logUserId, clientId: dbClient._id,
         phone: (msg.from || '').replace('@c.us', ''),
         message: logText, direction: 'incoming', status: 'received',
         whatsappMessageId: msg?.id?._serialized,
