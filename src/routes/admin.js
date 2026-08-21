@@ -115,6 +115,7 @@ const serializeNumber = async (client, assignedUsers = null) => {
     planId: client.planId || null,
     planStatus: client.planStatus || 'none',
     messageBalance: client.messageBalance ?? 0,
+    lastConnected: client.lastConnected || null,
     createdAt: client.createdAt,
     plan: plan
       ? {
@@ -148,6 +149,26 @@ router.get('/numbers', async (_req, res) => {
       .map((u) => ({ _id: u._id, name: u.name, email: u.email }));
     const plans = await Plan.findAll({ activeOnly: true });
     res.json({ numbers, users: assignableUsers, plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/numbers/:id — one number with assignable users and plans
+router.get('/numbers/:id', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({ _id: req.params.id, isActive: true });
+    if (!client) return res.status(404).json({ error: 'Number not found' });
+    const users = await User.findAll();
+    const assignableUsers = users
+      .filter((u) => !u.parentUserId && u.role !== 'admin')
+      .map((u) => ({ _id: u._id, name: u.name, email: u.email }));
+    const plans = await Plan.findAll({ activeOnly: true });
+    res.json({
+      number: await serializeNumber(client),
+      users: assignableUsers,
+      plans
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
