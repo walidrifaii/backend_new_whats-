@@ -40,7 +40,8 @@ const getOwnerSubscription = async (userOrOwnerId) => {
       enabledSources: [],
       knownSources: [],
       remaining: 0,
-      allowSourceSwitch: false
+      allowSourceSwitch: false,
+      enabledServices: []
     };
   }
 
@@ -52,6 +53,7 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const status = fromNumbers.plan ? 'active' : 'none';
   const sources = await UserSource.list(ownerId);
   const enabledSources = sources.filter((item) => item.enabled).map((item) => item.name);
+  const enabledServices = sources.filter((item) => item.enabled);
 
   return {
     owner,
@@ -61,6 +63,7 @@ const getOwnerSubscription = async (userOrOwnerId) => {
     status,
     sources,
     enabledSources,
+    enabledServices,
     knownSources: enabledSources,
     remaining: fromNumbers.remaining,
     sourceLimit: fromNumbers.sourceLimit,
@@ -91,6 +94,7 @@ const getAccountSubscription = async (userOrId) => {
     status: ownerSub.status,
     sources: ownerSub.sources,
     enabledSources: ownerSub.enabledSources,
+    enabledServices: ownerSub.enabledServices,
     knownSources: ownerSub.knownSources,
     remaining: ownerSub.remaining,
     sourceLimit: 0,
@@ -122,6 +126,7 @@ const serializeSubscription = (sub, user = null) => {
     remaining: sub.remaining || 0,
     sources: catalog,
     enabledSources,
+    enabledServices: catalog.filter((item) => item.enabled),
     sourceLimit,
     catalog,
     allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !isService,

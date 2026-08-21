@@ -30,8 +30,10 @@ CREATE TABLE IF NOT EXISTS user_sources (
   user_id CHAR(24) NOT NULL,
   source VARCHAR(64) NOT NULL,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  phone_number_id CHAR(24) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id, source),
+  KEY idx_user_sources_phone_number_id (phone_number_id),
   CONSTRAINT fk_user_sources_user
     FOREIGN KEY (user_id) REFERENCES users (id)
     ON DELETE CASCADE ON UPDATE CASCADE

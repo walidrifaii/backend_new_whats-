@@ -3,6 +3,7 @@ const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const Campaign = require('../models/Campaign');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
+const UserSource = require('../models/UserSource');
 const { query } = require('../db/mysql');
 const { sendBalanceExhaustedEmail } = require('../services/balanceNotifier');
 const { startCampaign, pauseCampaign, resumeCampaign, isOtpCampaign, shouldSkipBalanceForCampaign } = require('../services/campaignQueue');
@@ -68,12 +69,21 @@ router.post('/', authMiddleware, [
     const typeResolved = resolveMediaTypeForDb(req.body);
     const otpCampaign = String(name || '').startsWith('otp_');
     const source = getLockedSource(req.user) || normalizeMessageSource(req.body.source || req.body.service || req.headers['x-service-name']);
+    const ownerId = getOwnerUserId(req.user);
+    let requestedClientId = clientId;
+    if (source) {
+      const services = await UserSource.list(ownerId);
+      const service = services.find((item) => item.name === source && item.enabled);
+      if (service?.phoneNumberId && !requestedClientId) {
+        requestedClientId = service.phoneNumberId;
+      }
+    }
 
-    const client = await resolveWhatsAppClient(clientId, getOwnerUserId(req.user));
+    const client = await resolveWhatsAppClient(requestedClientId, ownerId);
     if (!client) return res.status(404).json({ error: 'WhatsApp client not found' });
 
     const campaign = await Campaign.create({
-      userId: getOwnerUserId(req.user),
+      userId: ownerId,
       clientId: client._id,
       name,
       message,

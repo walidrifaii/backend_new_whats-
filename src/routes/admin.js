@@ -64,12 +64,25 @@ const buildCredentialsPayload = async (req, user) => {
   const apiBaseUrl = getPublicApiBase(req);
   const primaryClient = clients.find((item) => item.status === 'connected') || clients[0] || null;
   const source = user.source || '';
+  const services = await UserSource.list(owner._id);
+  const envFor = (svc) => {
+    const numberId = svc?.phoneNumberId || primaryClient?._id || '';
+    return [
+      `WHATSAPP_NODE_URL=${apiBaseUrl}`,
+      `WHATSAPP_NODE_TOKEN=${token}`,
+      `WHATSAPP_NODE_CLIENT_ID=${numberId}`,
+      `WHATSAPP_NODE_SOURCE=${svc?.name || 'ehkini'}`
+    ].join('\n');
+  };
   const envLines = [
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
     primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient._id}` : 'WHATSAPP_NODE_CLIENT_ID=',
-    source ? `WHATSAPP_NODE_SOURCE=${source}` : 'WHATSAPP_NODE_SOURCE=shop'
+    source ? `WHATSAPP_NODE_SOURCE=${source}` : 'WHATSAPP_NODE_SOURCE=ehkini'
   ].filter(Boolean);
+  const laravelEnv = services.length
+    ? services.map((svc) => `# ${svc.name}\n${envFor(svc)}`).join('\n\n')
+    : envLines.join('\n');
 
   return {
     account: {
@@ -90,6 +103,13 @@ const buildCredentialsPayload = async (req, user) => {
     source: source || null,
     sourceOptional: true,
     sharesOwnerWhatsApp: Boolean(user.parentUserId),
+    services: services.map((svc) => ({
+      name: svc.name,
+      enabled: svc.enabled,
+      phoneNumberId: svc.phoneNumberId,
+      phoneNumber: svc.phoneNumber,
+      laravelEnv: envFor(svc)
+    })),
     clients: clients.map((item) => ({
       _id: item._id,
       name: item.name,
@@ -97,7 +117,7 @@ const buildCredentialsPayload = async (req, user) => {
       status: item.status,
       phone: item.phone || null
     })),
-    laravelEnv: envLines.join('\n')
+    laravelEnv
   };
 };
 
@@ -722,6 +742,18 @@ router.patch('/users/:id/source-lock', async (req, res) => {
   }
 });
 
+const bindNumberToOwner = async (ownerId, phoneNumberId) => {
+  if (!phoneNumberId) return null;
+  const number = await WhatsAppClientModel.findOne({ _id: String(phoneNumberId), isActive: true });
+  if (!number) {
+    const err = new Error('Phone number not found');
+    err.status = 404;
+    throw err;
+  }
+  await WhatsAppClientModel.addUser(number._id, ownerId);
+  return number;
+};
+
 const ownerSourcesPayload = async (user) => {
   const sources = await UserSource.list(user._id);
   const fresh = await User.findById(user._id);
@@ -749,44 +781,67 @@ router.patch('/users/:id/source-switch', async (req, res) => {
     res.json({
       ...payload,
       message: allow
-        ? 'Client can switch between allowed sources.'
-        : 'Client cannot switch sources.'
+        ? 'Client can switch between allowed services.'
+        : 'Client cannot switch services.'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
-// POST /api/admin/users/:id/sources — add a source name (shop, crm, …)
+// POST /api/admin/users/:id/sources — add a named service and attach a number
 router.post('/users/:id/sources', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
     const ownerId = user.parentUserId || user._id;
     const enabled = req.body.enabled !== false && req.body.enabled !== 0;
-    await UserSource.upsert(ownerId, req.body.source, enabled);
+    const phoneNumberId = req.body.phoneNumberId || req.body.clientId || null;
+    if (!phoneNumberId) {
+      return res.status(400).json({ error: 'Pick a phone number for this service.' });
+    }
+    await bindNumberToOwner(ownerId, phoneNumberId);
+    await UserSource.upsert(ownerId, req.body.source, { enabled, phoneNumberId });
     const owner = await User.findById(ownerId);
     const payload = await ownerSourcesPayload(owner);
-    res.status(201).json({ ...payload, message: `Added source ${normalizeMessageSource(req.body.source)}` });
+    res.status(201).json({
+      ...payload,
+      message: `Added service ${normalizeMessageSource(req.body.source)}`
+    });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
-// PATCH /api/admin/users/:id/sources — allow or block one source
+// PATCH /api/admin/users/:id/sources — allow/block or change number
 router.patch('/users/:id/sources', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
     const ownerId = user.parentUserId || user._id;
-    await UserSource.setEnabled(ownerId, req.body.source, Boolean(req.body.enabled));
+    const name = normalizeMessageSource(req.body.source);
+    if (!name) return res.status(400).json({ error: 'Service name is required' });
+
+    if (req.body.phoneNumberId !== undefined || req.body.clientId !== undefined) {
+      const phoneNumberId = req.body.phoneNumberId || req.body.clientId || null;
+      if (phoneNumberId) await bindNumberToOwner(ownerId, phoneNumberId);
+      await UserSource.setPhoneNumber(ownerId, name, phoneNumberId);
+    }
+    if (req.body.enabled !== undefined) {
+      await UserSource.setEnabled(ownerId, name, Boolean(req.body.enabled));
+    }
     const owner = await User.findById(ownerId);
     const payload = await ownerSourcesPayload(owner);
+    const service = (payload.user.sourceCatalog || []).find((item) => item.name === name);
     res.json({
       ...payload,
-      message: req.body.enabled
-        ? `${normalizeMessageSource(req.body.source)} is allowed.`
-        : `${normalizeMessageSource(req.body.source)} is not allowed.`
+      message: req.body.enabled === false
+        ? `${name} is not allowed.`
+        : req.body.enabled
+          ? `${name} is allowed.`
+          : service?.phoneNumber
+            ? `${name} now uses ${service.phoneNumber.phone || service.phoneNumber.name}.`
+            : `${name} updated.`
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

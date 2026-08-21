@@ -120,7 +120,14 @@ router.post(
       const phone = normalizePhone(req.body.phone).replace('@c.us', '');
       const ownerUserId = getOwnerUserId(req.user);
       const source = getLockedSource(req.user) || resolveMessageSource(req);
-      const dbClient = await resolveOtpClient(req.body.clientId, ownerUserId);
+      const sub = await getOwnerSubscription(ownerUserId);
+      const sourceCheck = assertSourceAllowed(sub, source);
+      if (!sourceCheck.ok) {
+        return res.status(403).json({ ok: false, error: sourceCheck.error, source });
+      }
+      const service = (sub.sources || []).find((item) => item.name === source && item.enabled);
+      const preferredClientId = req.body.clientId || service?.phoneNumberId || null;
+      const dbClient = await resolveOtpClient(preferredClientId, ownerUserId);
 
       if (!dbClient) {
         return res.status(503).json({
@@ -128,12 +135,6 @@ router.post(
           error:
             'No connected WhatsApp client available for OTP. Connect a client or set WHATSAPP_NODE_CLIENT_ID / OTP_DEFAULT_CLIENT_ID.'
         });
-      }
-
-      const sub = await getOwnerSubscription(ownerUserId);
-      const sourceCheck = assertSourceAllowed(sub, source);
-      if (!sourceCheck.ok) {
-        return res.status(403).json({ ok: false, error: sourceCheck.error, source });
       }
 
       const balanceCheck = await requireNumberBalance(dbClient, 1);

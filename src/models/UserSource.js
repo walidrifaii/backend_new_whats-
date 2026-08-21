@@ -1,12 +1,32 @@
 const { query } = require('../db/mysql');
 const { normalizeMessageSource } = require('../utils/messageSource');
 
+const LIST_SQL = `
+  SELECT
+    us.user_id, us.source, us.enabled, us.phone_number_id, us.created_at,
+    pn.name AS number_name, pn.phone AS number_phone, pn.status AS number_status,
+    pn.client_id AS number_client_id
+  FROM user_sources us
+  LEFT JOIN phone_numbers pn ON pn.id = us.phone_number_id
+`;
+
 const mapRow = (row) => {
   if (!row) return null;
+  const phoneNumberId = row.phone_number_id || null;
   return {
     userId: row.user_id,
     name: row.source,
     enabled: !!row.enabled,
+    phoneNumberId,
+    phoneNumber: phoneNumberId
+      ? {
+          _id: phoneNumberId,
+          name: row.number_name || '',
+          phone: row.number_phone || null,
+          status: row.number_status || '',
+          clientId: row.number_client_id || null
+        }
+      : null,
     createdAt: row.created_at
   };
 };
@@ -18,8 +38,10 @@ class UserSourceModel {
         user_id CHAR(24) NOT NULL,
         source VARCHAR(64) NOT NULL,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        phone_number_id CHAR(24) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, source),
+        KEY idx_user_sources_phone_number_id (phone_number_id),
         CONSTRAINT fk_user_sources_user
           FOREIGN KEY (user_id) REFERENCES users (id)
           ON DELETE CASCADE ON UPDATE CASCADE
@@ -32,15 +54,26 @@ class UserSourceModel {
         throw err;
       }
     }
+    try {
+      await query(`ALTER TABLE user_sources ADD COLUMN phone_number_id CHAR(24) NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
+    try {
+      await query(`ALTER TABLE user_sources ADD INDEX idx_user_sources_phone_number_id (phone_number_id)`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_KEYNAME' || String(err.message || '').includes('Duplicate key'))) {
+        throw err;
+      }
+    }
   }
 
   static async list(userId) {
     if (!userId) return [];
     const rows = await query(
-      `SELECT user_id, source, enabled, created_at
-       FROM user_sources
-       WHERE user_id = ?
-       ORDER BY source ASC`,
+      `${LIST_SQL} WHERE us.user_id = ? ORDER BY us.source ASC`,
       [String(userId)]
     );
     return rows.map(mapRow);
@@ -52,10 +85,7 @@ class UserSourceModel {
     ids.forEach((id) => { map[id] = []; });
     if (ids.length === 0) return map;
     const rows = await query(
-      `SELECT user_id, source, enabled, created_at
-       FROM user_sources
-       WHERE user_id IN (${ids.map(() => '?').join(', ')})
-       ORDER BY source ASC`,
+      `${LIST_SQL} WHERE us.user_id IN (${ids.map(() => '?').join(', ')}) ORDER BY us.source ASC`,
       ids
     );
     for (const row of rows) {
@@ -66,18 +96,21 @@ class UserSourceModel {
     return map;
   }
 
-  static async upsert(userId, source, enabled = true) {
+  static async upsert(userId, source, { enabled = true, phoneNumberId } = {}) {
     const name = normalizeMessageSource(source);
     if (!name) {
-      const err = new Error('Invalid source name');
+      const err = new Error('Invalid service name');
       err.status = 400;
       throw err;
     }
+    const numberId = phoneNumberId ? String(phoneNumberId) : null;
     await query(
-      `INSERT INTO user_sources (user_id, source, enabled, created_at)
-       VALUES (?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE enabled = VALUES(enabled)`,
-      [String(userId), name, enabled ? 1 : 0]
+      `INSERT INTO user_sources (user_id, source, enabled, phone_number_id, created_at)
+       VALUES (?, ?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         enabled = VALUES(enabled),
+         phone_number_id = COALESCE(VALUES(phone_number_id), phone_number_id)`,
+      [String(userId), name, enabled ? 1 : 0, numberId]
     );
     return this.list(userId);
   }
@@ -85,7 +118,7 @@ class UserSourceModel {
   static async setEnabled(userId, source, enabled) {
     const name = normalizeMessageSource(source);
     if (!name) {
-      const err = new Error('Invalid source name');
+      const err = new Error('Invalid service name');
       err.status = 400;
       throw err;
     }
@@ -95,7 +128,28 @@ class UserSourceModel {
     );
     const list = await this.list(userId);
     if (!list.some((item) => item.name === name)) {
-      const err = new Error('Source not found');
+      const err = new Error('Service not found');
+      err.status = 404;
+      throw err;
+    }
+    return list;
+  }
+
+  static async setPhoneNumber(userId, source, phoneNumberId) {
+    const name = normalizeMessageSource(source);
+    if (!name) {
+      const err = new Error('Invalid service name');
+      err.status = 400;
+      throw err;
+    }
+    const numberId = phoneNumberId ? String(phoneNumberId) : null;
+    await query(
+      `UPDATE user_sources SET phone_number_id = ? WHERE user_id = ? AND source = ?`,
+      [numberId, String(userId), name]
+    );
+    const list = await this.list(userId);
+    if (!list.some((item) => item.name === name)) {
+      const err = new Error('Service not found');
       err.status = 404;
       throw err;
     }
@@ -105,7 +159,7 @@ class UserSourceModel {
   static async remove(userId, source) {
     const name = normalizeMessageSource(source);
     if (!name) {
-      const err = new Error('Invalid source name');
+      const err = new Error('Invalid service name');
       err.status = 400;
       throw err;
     }
