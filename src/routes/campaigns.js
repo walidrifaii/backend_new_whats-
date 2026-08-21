@@ -36,10 +36,11 @@ const resolveWhatsAppClient = async (clientIdParam, userId) => {
 // GET /api/campaigns
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const campaigns = await Campaign.find(
-      { userId: getOwnerUserId(req.user) },
-      { sort: { createdAt: -1 } }
-    );
+    const ownerId = getOwnerUserId(req.user);
+    const filter = { userId: ownerId };
+    const source = getLockedSource(req.user) || normalizeMessageSource(req.query.source);
+    if (source) filter.source = source;
+    const campaigns = await Campaign.find(filter, { sort: { createdAt: -1 } });
     const clients = await WhatsAppClientModel.find({ userId: getOwnerUserId(req.user), isActive: true });
     const clientsById = new Map(clients.map((c) => [c._id, c]));
     const hydratedCampaigns = campaigns.map((campaign) => ({

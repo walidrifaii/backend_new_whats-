@@ -45,6 +45,10 @@ const buildFilter = (filter = {}) => {
     clauses.push('status = ?');
     values.push(String(filter.status));
   }
+  if (filter.source !== undefined) {
+    clauses.push('source = ?');
+    values.push(String(filter.source));
+  }
   return { clauses, values };
 };
 

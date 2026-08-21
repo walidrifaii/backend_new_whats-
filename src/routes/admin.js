@@ -67,7 +67,7 @@ const buildCredentialsPayload = async (req, user) => {
     `WHATSAPP_NODE_URL=${apiBaseUrl}`,
     `WHATSAPP_NODE_TOKEN=${token}`,
     primaryClient ? `WHATSAPP_NODE_CLIENT_ID=${primaryClient._id}` : 'WHATSAPP_NODE_CLIENT_ID=',
-    source ? `WHATSAPP_NODE_SOURCE=${source}` : '# WHATSAPP_NODE_SOURCE=  # optional, stats only'
+    source ? `WHATSAPP_NODE_SOURCE=${source}` : 'WHATSAPP_NODE_SOURCE=shop'
   ].filter(Boolean);
 
   return {

@@ -3,7 +3,6 @@ const router = express.Router();
 const MessageLog = require('../models/MessageLog');
 const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, applySourceScope } = require('../utils/accountScope');
-const { getOwnerSubscription } = require('../utils/subscription');
 
 // GET /api/logs - get all logs for user
 router.get('/', authMiddleware, async (req, res) => {
@@ -12,10 +11,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const pageNumber = parseInt(page, 10) || 1;
     const limitNumber = parseInt(limit, 10) || 50;
     const filter = { userId: getOwnerUserId(req.user) };
-    const sub = await getOwnerSubscription(req.user);
-    const configured = (sub.sources || []).length > 0 || Boolean(sub.plan);
-    const viewSources = configured ? (sub.enabledSources || []) : null;
-    applySourceScope(filter, req.user, source, viewSources);
+    applySourceScope(filter, req.user, source, null);
 
     if (campaignId) filter.campaignId = campaignId;
     if (clientId) filter.clientId = clientId;
@@ -42,20 +38,19 @@ router.get('/stats', authMiddleware, async (req, res) => {
     const filter = { userId: getOwnerUserId(req.user) };
     if (clientId) filter.clientId = clientId;
     if (campaignId) filter.campaignId = campaignId;
-    const sub = await getOwnerSubscription(req.user);
-    const configured = (sub.sources || []).length > 0 || Boolean(sub.plan);
-    const viewSources = configured ? (sub.enabledSources || []) : null;
-    applySourceScope(filter, req.user, source, viewSources);
+    applySourceScope(filter, req.user, source, null);
 
     const stats = await MessageLog.getStats(filter);
-    const bySourceFilter = { userId: getOwnerUserId(req.user) };
-    applySourceScope(bySourceFilter, req.user, null, viewSources);
+    const ownerId = getOwnerUserId(req.user);
+    const knownSources = await MessageLog.listKnownSources(ownerId);
+    const bySourceFilter = { userId: ownerId };
+    applySourceScope(bySourceFilter, req.user, null, null);
     const bySource = await MessageLog.getStatsBySource(bySourceFilter);
     res.json({
       stats: stats || { total: 0, sent: 0, failed: 0, received: 0, outgoing: 0, incoming: 0 },
       bySource,
-      enabledSources: sub.enabledSources || [],
-      knownSources: sub.enabledSources || []
+      enabledSources: knownSources,
+      knownSources
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -172,6 +172,27 @@ class MessageLogModel {
     return rows[0] || null;
   }
 
+  static async listKnownSources(userId) {
+    if (!userId) return [];
+    const logRows = await query(
+      `SELECT DISTINCT source AS source
+       FROM message_logs
+       WHERE user_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
+      [String(userId)]
+    );
+    const campaignRows = await query(
+      `SELECT DISTINCT source AS source
+       FROM campaigns
+       WHERE user_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
+      [String(userId)]
+    );
+    return [...new Set(
+      [...logRows, ...campaignRows]
+        .map((row) => String(row.source || '').trim())
+        .filter((name) => name && name !== '_untagged')
+    )].sort();
+  }
+
   static async getStatsBySource(filter = {}) {
     const { clauses, values } = buildFilter(filter);
     let sql = `
