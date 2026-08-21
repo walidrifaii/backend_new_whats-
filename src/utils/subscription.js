@@ -102,6 +102,8 @@ const getAccountSubscription = async (userOrId) => {
 const serializeSubscription = (sub, user = null) => {
   const isService = Boolean(user?.parentUserId || sub.sharesOwnerWhatsApp);
   const sourceLimit = isService ? 0 : (sub.sourceLimit || sub.plan?.sourceLimit || 0);
+  const enabledSources = sub.enabledSources || [];
+  const catalog = sub.sources || [];
   const mapPlan = (plan) => (
     plan
       ? {
@@ -113,13 +115,6 @@ const serializeSubscription = (sub, user = null) => {
         }
       : null
   );
-  return {
-    plan: mapPlan(sub.plan),
-    requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
-    status: sub.status || 'none',
-    remaining: sub.remaining || 0,
-  const enabledSources = sub.enabledSources || [];
-  const catalog = sub.sources || [];
   return {
     plan: mapPlan(sub.plan),
     requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
