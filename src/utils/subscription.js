@@ -2,6 +2,7 @@ const Plan = require('../models/Plan');
 const User = require('../models/User');
 const UserSource = require('../models/UserSource');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
+const App = require('../models/App');
 const { getOwnerUserId } = require('./accountScope');
 const { normalizeMessageSource } = require('./messageSource');
 
@@ -52,12 +53,16 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const fromNumbers = await planFromNumbers(numbers);
   const status = fromNumbers.plan ? 'active' : 'none';
   const sources = await UserSource.list(ownerId);
+  const apps = await App.listForClient(ownerId);
   const enabledSources = sources.filter((item) => item.enabled).map((item) => item.name);
   const enabledServices = sources.filter((item) => item.enabled);
+  const appRemaining = apps.reduce((sum, item) => sum + (Number(item.balance) || 0), 0);
+  const remaining = appRemaining > 0 ? appRemaining : fromNumbers.remaining;
 
   return {
     owner,
     numbers,
+    apps,
     plan: fromNumbers.plan,
     requestedPlan: fromNumbers.plan,
     status,
@@ -65,9 +70,10 @@ const getOwnerSubscription = async (userOrOwnerId) => {
     enabledSources,
     enabledServices,
     knownSources: enabledSources,
-    remaining: fromNumbers.remaining,
+    remaining,
     sourceLimit: fromNumbers.sourceLimit,
-    allowSourceSwitch: Boolean(owner?.allowSourceSwitch)
+    allowSourceSwitch: Boolean(owner?.allowSourceSwitch),
+    currentAppId: owner?.currentAppId || null
   };
 };
 
@@ -89,6 +95,7 @@ const getAccountSubscription = async (userOrId) => {
     owner: ownerSub.owner,
     billedUser: fresh,
     numbers: ownerSub.numbers,
+    apps: ownerSub.apps,
     plan: ownerSub.plan,
     requestedPlan: ownerSub.requestedPlan,
     status: ownerSub.status,
@@ -98,7 +105,8 @@ const getAccountSubscription = async (userOrId) => {
     knownSources: ownerSub.knownSources,
     remaining: ownerSub.remaining,
     sourceLimit: 0,
-    allowSourceSwitch: false,
+    allowSourceSwitch: Boolean(ownerSub.allowSourceSwitch) && !fresh.source,
+    currentAppId: ownerSub.currentAppId,
     sharesOwnerWhatsApp: true
   };
 };
@@ -125,12 +133,17 @@ const serializeSubscription = (sub, user = null) => {
     status: sub.status || 'none',
     remaining: sub.remaining || 0,
     sources: catalog,
+    apps: sub.apps || [],
+    currentAppId: sub.currentAppId || user?.currentAppId || null,
     enabledSources,
     enabledServices: catalog.filter((item) => item.enabled),
     sourceLimit,
     catalog,
-    allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !isService,
-    canSwitchSources: Boolean(sub.allowSourceSwitch) && !isService && enabledSources.length >= 2,
+    allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !user?.source,
+    canSwitchSources: Boolean(sub.allowSourceSwitch)
+      && Boolean(user?.parentUserId)
+      && !user?.source
+      && enabledSources.length >= 2,
     sharesOwnerWhatsApp: isService,
     currentSourceEnabled: true
   };

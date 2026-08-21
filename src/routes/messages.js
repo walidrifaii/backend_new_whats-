@@ -18,7 +18,7 @@ const {
 const authMiddleware = require('../middleware/auth');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
 const { resolveMessageSource } = require('../utils/messageSource');
-const { requireNumberBalance, chargeNumberBalance } = require('../utils/messageBilling');
+const { requireSendBalance, chargeSendBalance } = require('../utils/messageBilling');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 
 const MAX_BULK_PHONES = Math.max(1, parseInt(process.env.MAX_BULK_PHONES, 10) || 500);
@@ -162,7 +162,12 @@ router.post('/send-bulk', authMiddleware, async (req, res) => {
     if (!dbClient) {
       return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
-    const balanceCheck = await requireNumberBalance(dbClient, phoneList.length);
+    const balanceCheck = await requireSendBalance({
+      user: req.user,
+      dbClient,
+      source,
+      required: phoneList.length
+    });
     if (!balanceCheck.ok) {
       return res.status(403).json({
         error: balanceCheck.error || 'Insufficient message balance for this bulk job.',
@@ -332,7 +337,12 @@ router.post('/send', authMiddleware, async (req, res) => {
     if (!dbClient) {
       return res.status(404).json({ error: CLIENT_NOT_FOUND_HELP });
     }
-    const balanceCheck = await requireNumberBalance(dbClient, 1);
+    const balanceCheck = await requireSendBalance({
+      user: req.user,
+      dbClient,
+      source,
+      required: 1
+    });
     if (!balanceCheck.ok) {
       sendBalanceExhaustedEmail({
         userId: getOwnerUserId(req.user),
@@ -369,7 +379,12 @@ router.post('/send', authMiddleware, async (req, res) => {
       sendOpts
     );
 
-    await chargeNumberBalance(dbClient, 1);
+    await chargeSendBalance({
+      user: req.user,
+      dbClient,
+      source,
+      amount: 1
+    });
     const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
     if (updatedBalance !== null && updatedBalance <= 0) {
       sendBalanceExhaustedEmail({

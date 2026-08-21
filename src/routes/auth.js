@@ -107,7 +107,7 @@ const issueUserSession = async (user) => {
   return token;
 };
 
-// POST /api/auth/stats-login — owner (source switcher) or locked service login
+// POST /api/auth/stats-login — sub-account on a WhatsApp client; can switch that client's services
 router.post('/stats-login', [
   body('email').isEmail(),
   body('password').notEmpty()
@@ -125,6 +125,9 @@ router.post('/stats-login', [
     if (!user.isActive) return res.status(401).json({ error: 'Account is inactive' });
     if (user.role === 'admin') {
       return res.status(403).json({ error: 'Use /admin-login for the admin dashboard.' });
+    }
+    if (!user.parentUserId) {
+      return res.status(403).json({ error: 'Use /login for this WhatsApp account. /stats-login is for sub-accounts.' });
     }
 
     const token = await issueUserSession(user);

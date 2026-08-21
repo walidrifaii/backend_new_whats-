@@ -227,6 +227,8 @@ testConnection()
     await User.ensureAuthTokenColumn();
     await Plan.ensureTable();
     await UserSource.ensureTable();
+    const App = require('./models/App');
+    await App.ensureTable();
     await WhatsAppClientModel.ensurePoolColumns();
     await MessageJob.ensureTables();
     await MessageLog.ensureSourceColumn();

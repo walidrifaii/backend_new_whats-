@@ -1,5 +1,6 @@
 const { query } = require('../db/mysql');
 const { normalizeMessageSource } = require('../utils/messageSource');
+const App = require('./App');
 
 const LIST_SQL = `
   SELECT
@@ -112,6 +113,12 @@ class UserSourceModel {
          phone_number_id = COALESCE(VALUES(phone_number_id), phone_number_id)`,
       [String(userId), name, enabled ? 1 : 0, numberId]
     );
+    await App.upsert({
+      clientId: userId,
+      otpNumberId: numberId,
+      service: name,
+      isActive: enabled
+    });
     return this.list(userId);
   }
 
@@ -126,13 +133,20 @@ class UserSourceModel {
       `UPDATE user_sources SET enabled = ? WHERE user_id = ? AND source = ?`,
       [enabled ? 1 : 0, String(userId), name]
     );
-    const list = await this.list(userId);
-    if (!list.some((item) => item.name === name)) {
+    const existing = await this.list(userId);
+    const row = existing.find((item) => item.name === name);
+    if (!row) {
       const err = new Error('Service not found');
       err.status = 404;
       throw err;
     }
-    return list;
+    await App.upsert({
+      clientId: userId,
+      otpNumberId: row.phoneNumberId,
+      service: name,
+      isActive: enabled
+    });
+    return existing;
   }
 
   static async setPhoneNumber(userId, source, phoneNumberId) {
@@ -147,6 +161,12 @@ class UserSourceModel {
       `UPDATE user_sources SET phone_number_id = ? WHERE user_id = ? AND source = ?`,
       [numberId, String(userId), name]
     );
+    await App.upsert({
+      clientId: userId,
+      otpNumberId: numberId,
+      service: name,
+      isActive: true
+    });
     const list = await this.list(userId);
     if (!list.some((item) => item.name === name)) {
       const err = new Error('Service not found');
@@ -167,6 +187,10 @@ class UserSourceModel {
       `DELETE FROM user_sources WHERE user_id = ? AND source = ?`,
       [String(userId), name]
     );
+    const app = await App.findByClientService(userId, name);
+    if (app) {
+      await query(`UPDATE apps SET is_active = 0 WHERE id = ?`, [app._id]);
+    }
     return this.list(userId);
   }
 }

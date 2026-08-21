@@ -8,6 +8,7 @@ const { normalizePhone, sleep } = require('../utils/helpers');
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
 const { getOwnerUserId } = require('../utils/accountScope');
+const { requireSendBalance, chargeSendBalance } = require('../utils/messageBilling');
 
 const POLL_MS = Math.max(5000, parseInt(process.env.BULK_SCHEDULER_POLL_MS, 10) || 30000);
 
@@ -127,8 +128,12 @@ const processMessageJob = async (jobId) => {
       }
     }
 
-    const userBalance = await WhatsAppClientModel.getBalance(dbClient._id);
-    if (userBalance <= 0) {
+    const balanceCheck = await requireSendBalance({
+      user: jobOwner,
+      dbClient,
+      required: 1
+    });
+    if (!balanceCheck.ok) {
       console.log(`⛔ Bulk job ${jobId} stopped — insufficient message balance.`);
       const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
       await failPendingItems(jobId, reason);
@@ -162,8 +167,11 @@ const processMessageJob = async (jobId) => {
     }
 
     if (success) {
-      await WhatsAppClientModel.decrementBalance(dbClient._id, 1);
-      const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
+      const updatedBalance = await chargeSendBalance({
+        user: jobOwner,
+        dbClient,
+        amount: 1
+      });
       if (updatedBalance <= 0) {
         sendBalanceExhaustedEmail({
           userId: job.userId,

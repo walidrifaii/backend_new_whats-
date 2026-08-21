@@ -1,0 +1,293 @@
+Project whatsapp_saas {
+  database_type: "MySQL"
+  Note: '''
+    Logic:
+    - One client can use many OTP numbers
+    - One OTP number can be used by many clients
+    - App is the link: client + number + service
+    - Client switches service by changing current_App_id
+    - Subscription (plan/credits) belongs to the client
+    - Sending uses App.balance and App.OTP_NUMBER_id
+  '''
+}
+
+Enum campaign_status {
+  draft
+  running
+  paused
+  completed
+  failed
+}
+
+Enum contact_status {
+  pending
+  sent
+  failed
+  skipped
+}
+
+Enum message_direction {
+  outgoing
+  incoming
+}
+
+Enum message_status {
+  sent
+  failed
+  received
+}
+
+Enum job_status {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+Enum job_item_status {
+  pending
+  sent
+  failed
+}
+
+Enum media_type {
+  image
+  video
+  document
+}
+
+Enum number_status {
+  disconnected
+  initializing
+  qr_ready
+  connected
+  auth_failure
+}
+
+TableGroup core {
+  client
+  OTP_NUMBER
+  App
+  plan
+  subscription
+}
+
+TableGroup campaigns_messages {
+  campaigns
+  contacts
+  message_logs
+  message_jobs
+  message_job_items
+}
+
+TableGroup extra {
+  admins
+  token_sessions
+}
+
+// ---------------- core ----------------
+
+Table client {
+  id char(24) [pk]
+  name varchar(120) [not null]
+  email varchar(190) [unique, not null]
+  password varchar(255) [not null]
+  is_active boolean [default: true]
+  allow_service_switch boolean [default: false, note: 'false = locked to current_App_id']
+  current_App_id char(24) [null, note: 'active service; switch = update this field']
+  created_at datetime
+}
+
+Table OTP_NUMBER {
+  id char(24) [pk]
+  title varchar(120) [not null]
+  number varchar(190) [unique, not null]
+  status number_status [default: 'disconnected']
+  qr_code longtext
+  session_path varchar(500)
+  last_connected datetime
+  is_active boolean [default: true]
+  created_at datetime
+
+  Note: "WhatsApp line. Clients reach it only through App"
+}
+
+Table App {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  OTP_NUMBER_id char(24) [not null]
+  service varchar(64) [not null, note: 'ehkini, shop, whatsapp, ...']
+  Active boolean [default: true]
+  balance int [default: 0, note: 'credits left for this service']
+  created_at datetime
+
+  indexes {
+    (client_id, service) [unique, name: 'uq_app_client_service']
+    (OTP_NUMBER_id)
+    (client_id)
+  }
+
+  Note: "THE relation table. Many-to-many client <-> number, plus which service and its balance"
+}
+
+Table plan {
+  id char(24) [pk]
+  name varchar(120) [not null]
+  credits int [note: 'messages added when subscribed']
+  amount decimal(10,2)
+  source_limit int [default: 1, note: 'max Active App/services this client may use']
+  is_active boolean [default: true]
+}
+
+Table subscription {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  plan_id char(24)
+  credits int [note: 'copied from plan at purchase']
+  amount decimal(10,2)
+  Active boolean [default: true]
+  created_at datetime
+
+  indexes {
+    (client_id)
+    (plan_id)
+  }
+
+  Note: "Plan is bought by the client, not by the number"
+}
+
+// ---------------- campaigns + messages ----------------
+
+Table campaigns {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  App_id char(24) [not null, note: 'service used for this campaign']
+  OTP_NUMBER_id char(24) [not null]
+  name varchar(200) [not null]
+  message text [not null]
+  media_url varchar(2048)
+  media_type media_type
+  status campaign_status [not null, default: 'draft']
+  min_delay int [not null, default: 20000]
+  max_delay int [not null, default: 30000]
+  total_contacts int [not null, default: 0]
+  sent_count int [not null, default: 0]
+  failed_count int [not null, default: 0]
+  pending_count int [not null, default: 0]
+  started_at datetime
+  completed_at datetime
+  created_at datetime
+  updated_at datetime
+}
+
+Table contacts {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  campaign_id char(24) [not null]
+  name varchar(200)
+  phone varchar(40) [not null]
+  variables json
+  status contact_status [not null, default: 'pending']
+  sent_at datetime
+  error text
+  created_at datetime
+}
+
+Table message_logs {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  App_id char(24) [note: 'which service sent/received']
+  OTP_NUMBER_id char(24) [not null]
+  campaign_id char(24)
+  contact_id char(24)
+  phone varchar(40) [not null]
+  message text [not null]
+  direction message_direction [not null, default: 'outgoing']
+  status message_status [not null, default: 'sent']
+  whatsapp_message_id varchar(255)
+  error text
+  timestamp datetime
+}
+
+Table message_jobs {
+  id char(24) [pk]
+  client_id char(24) [not null]
+  App_id char(24)
+  OTP_NUMBER_id char(24) [not null]
+  message text [not null]
+  media_url varchar(2048)
+  status job_status [not null, default: 'queued']
+  min_delay int [not null, default: 20000]
+  max_delay int [not null, default: 30000]
+  spread_hours decimal(8,2) [not null, default: 16]
+  total_count int [not null, default: 0]
+  sent_count int [not null, default: 0]
+  failed_count int [not null, default: 0]
+  pending_count int [not null, default: 0]
+  started_at datetime
+  completed_at datetime
+  created_at datetime
+}
+
+Table message_job_items {
+  id char(24) [pk]
+  job_id char(24) [not null]
+  client_id char(24) [not null]
+  phone varchar(40) [not null]
+  status job_item_status [not null, default: 'pending']
+  whatsapp_message_id varchar(255)
+  error text
+  scheduled_at datetime
+  sent_at datetime
+  created_at datetime
+}
+
+Table admins {
+  id int [pk, increment]
+  name varchar(120) [not null]
+  email varchar(255) [unique, not null]
+  password varchar(255) [not null]
+  is_active boolean [default: true]
+  created_at datetime
+}
+
+Table token_sessions {
+  id int [pk, increment]
+  token_hash char(64) [unique, not null]
+  token text [not null]
+  owner_type varchar(20) [not null]
+  owner_id varchar(64) [not null]
+  is_active boolean [default: true]
+  created_at datetime
+  expires_at datetime
+}
+
+// ---------------- relationships ----------------
+
+Ref: App.client_id > client.id
+Ref: App.OTP_NUMBER_id > OTP_NUMBER.id
+Ref: client.current_App_id > App.id
+
+Ref: subscription.client_id > client.id
+Ref: subscription.plan_id > plan.id
+
+Ref: campaigns.client_id > client.id
+Ref: campaigns.App_id > App.id
+Ref: campaigns.OTP_NUMBER_id > OTP_NUMBER.id
+
+Ref: contacts.client_id > client.id
+Ref: contacts.campaign_id > campaigns.id
+
+Ref: message_logs.client_id > client.id
+Ref: message_logs.App_id > App.id
+Ref: message_logs.OTP_NUMBER_id > OTP_NUMBER.id
+Ref: message_logs.campaign_id > campaigns.id
+Ref: message_logs.contact_id > contacts.id
+
+Ref: message_jobs.client_id > client.id
+Ref: message_jobs.App_id > App.id
+Ref: message_jobs.OTP_NUMBER_id > OTP_NUMBER.id
+
+Ref: message_job_items.job_id > message_jobs.id
+Ref: message_job_items.client_id > client.id

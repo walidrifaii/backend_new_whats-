@@ -12,7 +12,7 @@ const authMiddleware = require('../middleware/auth');
 const { resolveMediaUrlForDb, resolveMediaTypeForDb } = require('../utils/campaignMedia');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource } = require('../utils/accountScope');
-const { requireNumberBalance } = require('../utils/messageBilling');
+const { requireSendBalance } = require('../utils/messageBilling');
 
 const formatCampaign = (campaign, client = null) => {
   if (!campaign) return campaign;
@@ -191,7 +191,12 @@ router.post('/:id/start', authMiddleware, async (req, res) => {
     }
 
     if (!shouldSkipBalanceForCampaign(campaign, req.user)) {
-      const balanceCheck = await requireNumberBalance(client, 1);
+      const balanceCheck = await requireSendBalance({
+        user: req.user,
+        dbClient: client,
+        source: campaign.source || getLockedSource(req.user),
+        required: 1
+      });
       if (!balanceCheck.ok) {
         const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
         const pendingRows = await query(

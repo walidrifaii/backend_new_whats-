@@ -64,7 +64,10 @@ router.get('/stats', authMiddleware, async (req, res) => {
       enabledSources: sub.enabledSources || [],
       knownSources,
       allowSourceSwitch: Boolean(sub.allowSourceSwitch),
-      canSwitchSources: Boolean(sub.allowSourceSwitch) && (sub.enabledSources || []).length >= 2
+      canSwitchSources: Boolean(sub.allowSourceSwitch)
+        && Boolean(req.user.parentUserId)
+        && !req.user.source
+        && (sub.enabledSources || []).length >= 2
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

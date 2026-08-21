@@ -11,7 +11,7 @@ const {
 const { normalizePhone } = require('../utils/helpers');
 const { resolveMessageSource } = require('../utils/messageSource');
 const { getOwnerUserId, getLockedSource, applySourceScope } = require('../utils/accountScope');
-const { requireNumberBalance, chargeNumberBalance } = require('../utils/messageBilling');
+const { requireSendBalance, chargeSendBalance } = require('../utils/messageBilling');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
 const otpAuthMiddleware = require('../middleware/otpAuth');
 const authMiddleware = require('../middleware/auth');
@@ -137,7 +137,12 @@ router.post(
         });
       }
 
-      const balanceCheck = await requireNumberBalance(dbClient, 1);
+      const balanceCheck = await requireSendBalance({
+        user: req.user,
+        dbClient,
+        source,
+        required: 1
+      });
       if (!balanceCheck.ok) {
         return res.status(403).json({
           ok: false,
@@ -171,7 +176,12 @@ router.post(
       });
 
       let remainingBalance = null;
-      remainingBalance = await chargeNumberBalance(dbClient, 1);
+      remainingBalance = await chargeSendBalance({
+        user: req.user,
+        dbClient,
+        source,
+        amount: 1
+      });
 
       console.log(`✅ OTP sent to ${phone} via ${sessionClientId}${source ? ` source=${source}` : ''}`);
 

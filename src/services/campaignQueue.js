@@ -12,6 +12,7 @@ const { renderTemplate, normalizePhone, sleep, randomDelay } = require('../utils
 const { emitToClient } = require('../utils/socket');
 const { sendBalanceExhaustedEmail } = require('./balanceNotifier');
 const { getOwnerSubscription, assertSourceAllowed } = require('../utils/subscription');
+const { requireSendBalance, chargeSendBalance } = require('../utils/messageBilling');
 
 const logBalanceEmailResult = (context, result, email) => {
   console.log(
@@ -195,8 +196,13 @@ const processCampaign = async (campaignId) => {
 
       // Check message balance before sending (OTP campaigns skip unless they map to a service account)
       if (!skipBalance) {
-        const userBalance = await WhatsAppClientModel.getBalance(dbClient._id);
-        if (userBalance <= 0) {
+        const balanceCheck = await requireSendBalance({
+          user: notifyUser,
+          dbClient,
+          source: campaign.source,
+          required: 1
+        });
+        if (!balanceCheck.ok) {
           console.log(`⛔ Campaign ${campaignId} stopped — insufficient message balance.`);
           const reason = 'Failed: insufficient message balance. You need to charge balance in message.';
           const { pendingCount, updatedCampaign } = await failPendingContacts(campaignId, reason);
@@ -252,8 +258,12 @@ const processCampaign = async (campaignId) => {
       }
 
       if (success && !skipBalance) {
-        await WhatsAppClientModel.decrementBalance(dbClient._id, 1);
-        const updatedBalance = await WhatsAppClientModel.getBalance(dbClient._id);
+        const updatedBalance = await chargeSendBalance({
+          user: notifyUser,
+          dbClient,
+          source: campaign.source,
+          amount: 1
+        });
         if (updatedBalance <= 0) {
           sendBalanceExhaustedEmail({
             userId: notifyUser?._id,

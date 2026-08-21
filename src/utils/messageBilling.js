@@ -1,5 +1,7 @@
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const User = require('../models/User');
+const App = require('../models/App');
+const { getOwnerUserId } = require('./accountScope');
 const { normalizeMessageSource } = require('./messageSource');
 
 const hasActivePlan = (account) => Boolean(account?.planStatus === 'active' && account.planId);
@@ -34,6 +36,17 @@ const resolveBilledUser = async ({ user = null, ownerUserId = null, source = nul
   if (serviceUser) return serviceUser;
   if (user) return user;
   return owner || null;
+};
+
+const resolveBilledApp = async ({ user = null, ownerUserId = null, source = null } = {}) => {
+  const ownerId = ownerUserId || getOwnerUserId(user);
+  if (!ownerId) return null;
+  const owner = user && String(user._id) === String(ownerId) ? user : await User.findById(ownerId);
+  return App.resolveForSend(ownerId, {
+    source: source || user?.source,
+    currentAppId: owner?.currentAppId,
+    allowSwitch: Boolean(owner?.allowSourceSwitch)
+  });
 };
 
 const requireMessageBalance = async (billedUser, required = 1) => {
@@ -86,10 +99,55 @@ const chargeNumberBalance = async (dbClient, amount = 1) => {
   return WhatsAppClientModel.decrementBalance(dbClient._id, amount);
 };
 
+const requireAppBalance = async (app, required = 1) => {
+  if (!app) {
+    return { ok: true, balance: null, billedApp: null };
+  }
+  const fresh = await App.findById(app._id);
+  const balance = Number(fresh?.balance ?? app.balance ?? 0);
+  if (balance < required) {
+    return {
+      ok: false,
+      balance,
+      billedApp: fresh || app,
+      error: 'You need to charge balance in message.',
+      balanceExhausted: true,
+      currentBalance: balance,
+      required
+    };
+  }
+  return { ok: true, balance, billedApp: fresh || app };
+};
+
+const chargeAppBalance = async (app, amount = 1) => {
+  if (!app) return null;
+  return App.decrementBalance(app._id, amount);
+};
+
+const requireSendBalance = async ({ user, dbClient, source, required = 1 } = {}) => {
+  const app = await resolveBilledApp({ user, source });
+  if (app) return requireAppBalance(app, required);
+  return requireNumberBalance(dbClient, required);
+};
+
+const chargeSendBalance = async ({ user, dbClient, source, amount = 1 } = {}) => {
+  const app = await resolveBilledApp({ user, source });
+  if (app) {
+    const updated = await chargeAppBalance(app, amount);
+    return Number(updated?.balance) || 0;
+  }
+  return chargeNumberBalance(dbClient, amount);
+};
+
 module.exports = {
   resolveBilledUser,
+  resolveBilledApp,
   requireMessageBalance,
   chargeMessageBalance,
   requireNumberBalance,
-  chargeNumberBalance
+  chargeNumberBalance,
+  requireAppBalance,
+  chargeAppBalance,
+  requireSendBalance,
+  chargeSendBalance
 };

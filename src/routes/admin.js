@@ -499,11 +499,15 @@ router.get('/users', async (req, res) => {
     }
 
     const catalogMap = await UserSource.listForUsers(result.map((row) => row.parentUserId || row._id));
+    const switchByOwner = {};
+    for (const row of result) {
+      if (!row.parentUserId) switchByOwner[row._id] = Boolean(row.allowSourceSwitch);
+    }
     for (const row of result) {
       const ownerId = row.parentUserId || row._id;
       row.sourceCatalog = catalogMap[ownerId] || [];
       row.enabledSources = row.sourceCatalog.filter((item) => item.enabled).map((item) => item.name);
-      if (row.parentUserId) row.allowSourceSwitch = false;
+      if (row.parentUserId) row.allowSourceSwitch = Boolean(switchByOwner[row.parentUserId]);
     }
 
     res.json({ users: result, plans });
@@ -578,7 +582,19 @@ router.patch('/users/:id/toggle-active', async (req, res) => {
   }
 });
 
-// POST /api/admin/users/:id/service-accounts — create a locked source login on this WhatsApp owner
+router.get('/users/:id/service-accounts', async (req, res) => {
+  try {
+    const parent = await User.findById(req.params.id);
+    if (!parent) return res.status(404).json({ error: 'Owner account not found' });
+    const ownerId = parent.parentUserId || parent._id;
+    const accounts = await User.findByParentUserId(ownerId);
+    res.json({ accounts: accounts.map((item) => item.toJSON()) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/service-accounts — create a stats-login sub-account on this WhatsApp owner
 router.post('/users/:id/service-accounts', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
@@ -607,9 +623,7 @@ router.post('/users/:id/service-accounts', [
 
     res.status(201).json({
       user: user.toJSON(),
-      message: user.source
-        ? `Service login created for source "${user.source}". They share this owner's WhatsApp.`
-        : 'Service login created. They share this owner\'s WhatsApp.'
+      message: 'Stats login created. They sign in at /stats-login and can switch this client’s services.'
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

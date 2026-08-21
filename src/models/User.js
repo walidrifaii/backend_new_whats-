@@ -17,6 +17,7 @@ const mapRowToUser = (row) => {
     parentUserId: row.parent_user_id || null,
     source: row.source || null,
     allowSourceSwitch: !!row.allow_source_switch,
+    currentAppId: row.current_app_id || null,
     planId: row.plan_id || null,
     planStatus: row.plan_status || 'none',
     isServiceAccount: Boolean(row.parent_user_id),
@@ -36,7 +37,7 @@ const mapRowToUser = (row) => {
 };
 
 class UserModel {
-  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, allow_source_switch, plan_id, plan_status, created_at';
+  static COLUMNS = 'id, name, email, password, role, is_active, auth_token, api_token, api_token_created_at, message_balance, parent_user_id, source, allow_source_switch, current_app_id, plan_id, plan_status, created_at';
 
   static async ensureAuthTokenColumn() {
     try {
@@ -63,6 +64,17 @@ class UserModel {
     await this.ensureServiceAccountColumns();
     await this.ensurePlanColumns();
     await this.ensureAllowSourceSwitchColumn();
+    await this.ensureCurrentAppColumn();
+  }
+
+  static async ensureCurrentAppColumn() {
+    try {
+      await query(`ALTER TABLE users ADD COLUMN current_app_id CHAR(24) NULL`);
+    } catch (err) {
+      if (!(err.code === 'ER_DUP_FIELDNAME' || String(err.message || '').includes('Duplicate column'))) {
+        throw err;
+      }
+    }
   }
 
   static async ensureAllowSourceSwitchColumn() {
