@@ -140,13 +140,42 @@ class AppModel {
   }
 
   static async assignToClient(clientId, otpNumberId, { service = 'whatsapp', balance, isActive = true } = {}) {
+    let credits = balance;
+    if (credits === undefined && otpNumberId) {
+      try {
+        const WhatsAppClientModel = require('./WhatsAppClient');
+        const number = await WhatsAppClientModel.findOne({ _id: otpNumberId });
+        credits = Number(number?.messageBalance) || 0;
+      } catch (_) {
+        credits = 0;
+      }
+    }
     return this.upsert({
       clientId,
       otpNumberId,
       service,
       isActive,
-      balance
+      balance: credits
     });
+  }
+
+  /** Keep App.balance in sync when admin tops up an OTP number. */
+  static async setBalanceForOtpNumber(otpNumberId, balance) {
+    if (!otpNumberId) return;
+    const value = Math.max(0, parseInt(balance, 10) || 0);
+    await query(
+      `UPDATE ${APP} SET balance = ? WHERE OTP_NUMBER_id = ?`,
+      [value, String(otpNumberId)]
+    );
+  }
+
+  static async setBalance(appId, balance) {
+    if (!appId) return null;
+    await query(
+      `UPDATE ${APP} SET balance = ? WHERE id = ?`,
+      [Math.max(0, parseInt(balance, 10) || 0), String(appId)]
+    );
+    return this.findById(appId);
   }
 
   static async deactivateForAssignment(clientId, otpNumberId) {

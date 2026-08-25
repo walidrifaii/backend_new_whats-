@@ -330,6 +330,8 @@ router.patch('/numbers/:id/balance', [
     }
 
     const updated = await WhatsAppClientModel.updateBalance(client._id, nextBalance);
+    const App = require('../models/App');
+    await App.setBalanceForOtpNumber(client._id, nextBalance);
     res.json({
       number: await serializeNumber(updated),
       message: `Number balance set to ${updated.messageBalance}`

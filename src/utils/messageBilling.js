@@ -125,7 +125,16 @@ const chargeAppBalance = async (app, amount = 1) => {
 };
 
 const requireSendBalance = async ({ user, dbClient, source, required = 1 } = {}) => {
-  const app = await resolveBilledApp({ user, source });
+  let app = await resolveBilledApp({ user, source });
+  // If App exists but was never topped up, copy credits from the OTP number.
+  if (app && dbClient) {
+    const appBal = Number(app.balance) || 0;
+    const numBal = Number(dbClient.messageBalance) || 0;
+    if (appBal < required && numBal > appBal) {
+      await App.setBalance(app._id, numBal);
+      app = await App.findById(app._id);
+    }
+  }
   if (app) return requireAppBalance(app, required);
   return requireNumberBalance(dbClient, required);
 };
@@ -134,6 +143,9 @@ const chargeSendBalance = async ({ user, dbClient, source, amount = 1 } = {}) =>
   const app = await resolveBilledApp({ user, source });
   if (app) {
     const updated = await chargeAppBalance(app, amount);
+    if (dbClient) {
+      await chargeNumberBalance(dbClient, amount);
+    }
     return Number(updated?.balance) || 0;
   }
   return chargeNumberBalance(dbClient, amount);

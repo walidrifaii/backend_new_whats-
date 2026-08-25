@@ -79,7 +79,7 @@ router.post('/login', [
 
     const token = await issueUserSession(user);
     const sub = await getAccountSubscription(user);
-    const remaining = sub.status === 'active' ? sub.remaining : user.messageBalance;
+    const remaining = Number(sub.remaining ?? 0);
     return res.json({
       token,
       user: {
@@ -133,7 +133,7 @@ router.post('/stats-login', [
 
     const token = await issueUserSession(user);
     const sub = await getAccountSubscription(user);
-    const remaining = sub.status === 'active' ? sub.remaining : user.messageBalance;
+    const remaining = Number(sub.remaining ?? 0);
     return res.json({
       token,
       user: {
@@ -188,7 +188,7 @@ router.post('/admin-login', [
 router.get('/me', authMiddleware, async (req, res) => {
   try {
     const sub = await getAccountSubscription(req.user);
-    const remaining = sub.status === 'active' ? sub.remaining : (req.user.messageBalance ?? 0);
+    const remaining = Number(sub.remaining ?? 0);
     res.json({
       user: {
         ...req.user,

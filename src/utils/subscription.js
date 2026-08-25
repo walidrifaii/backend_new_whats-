@@ -57,7 +57,8 @@ const getOwnerSubscription = async (userOrOwnerId) => {
   const enabledSources = sources.filter((item) => item.enabled).map((item) => item.name);
   const enabledServices = sources.filter((item) => item.enabled);
   const appRemaining = apps.reduce((sum, item) => sum + (Number(item.balance) || 0), 0);
-  const remaining = appRemaining > 0 ? appRemaining : fromNumbers.remaining;
+  // Prefer App balances when charged there; fall back to OTP number balances if Apps are still 0.
+  const remaining = Math.max(appRemaining, fromNumbers.remaining);
 
   return {
     owner,
