@@ -25,6 +25,30 @@ const withTimeout = (promise, ms, message) => {
   ]);
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const CREATE_QR_WAIT_MS = Math.max(
+  10000,
+  parseInt(process.env.CREATE_QR_WAIT_MS, 10) || 55000
+);
+const CREATE_QR_POLL_MS = Math.max(
+  500,
+  parseInt(process.env.CREATE_QR_POLL_MS, 10) || 1500
+);
+
+/** Poll DB until WhatsApp QR is saved, or give up after timeout. */
+const waitForClientQr = async (dbId) => {
+  const deadline = Date.now() + CREATE_QR_WAIT_MS;
+  while (Date.now() < deadline) {
+    const row = await WhatsAppClientModel.findOne({ _id: dbId });
+    if (!row) return null;
+    if (row.qrCode) return row;
+    if (['connected', 'auth_failure'].includes(row.status)) return row;
+    await sleep(CREATE_QR_POLL_MS);
+  }
+  return WhatsAppClientModel.findOne({ _id: dbId });
+};
+
 // GET /api/clients - list all clients for user
 router.get('/', authMiddleware, async (req, res) => {
   try {
@@ -94,24 +118,33 @@ router.post('/', authMiddleware, [
       status: 'disconnected'
     });
 
-    const client = await WhatsAppClientModel.findByIdAndUpdate(
+    await WhatsAppClientModel.findByIdAndUpdate(
       created._id,
       { status: 'initializing' },
       { new: true }
     );
 
-    res.status(201).json({
-      client,
-      message: 'WhatsApp number created. Scan the QR code to connect.'
+    // Start WhatsApp session; QR is written to DB when ready.
+    createWhatsAppClient(sessionId).catch((err) => {
+      console.error(`Client self-create init error for ${sessionId}:`, err);
     });
 
-    (async () => {
-      try {
-        await createWhatsAppClient(sessionId);
-      } catch (err) {
-        console.error(`Client self-create init error for ${sessionId}:`, err);
-      }
-    })();
+    const client = await waitForClientQr(created._id);
+    const qrShare = buildQrSharePayload(req, sessionId);
+
+    if (!client) {
+      return res.status(500).json({ error: 'WhatsApp number was created but could not be loaded.' });
+    }
+
+    const hasQr = Boolean(client.qrCode);
+    res.status(201).json({
+      client,
+      qrCode: client.qrCode || null,
+      qrShare: qrShare || null,
+      message: hasQr
+        ? 'WhatsApp number created. Scan the QR code to connect.'
+        : 'WhatsApp number created. QR is still generating — poll GET /api/clients/:id or open the QR share page.'
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
