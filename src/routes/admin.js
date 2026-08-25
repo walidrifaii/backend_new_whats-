@@ -341,7 +341,7 @@ router.patch('/numbers/:id/balance', [
   }
 });
 
-// POST /api/admin/users — create an owner account
+// POST /api/admin/users — create an owner account (optional OTP numberIds → App rows)
 router.post('/users', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
@@ -364,9 +364,36 @@ router.post('/users', [
       role: 'user'
     });
 
+    const rawIds = Array.isArray(req.body.numberIds)
+      ? req.body.numberIds
+      : (req.body.numberId ? [req.body.numberId] : []);
+    const numberIds = [...new Set(rawIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    const assigned = [];
+    for (const numberId of numberIds) {
+      const number = await WhatsAppClientModel.findOne({ _id: numberId, isActive: true });
+      if (!number) {
+        return res.status(404).json({
+          error: `OTP number not found: ${numberId}`,
+          user: user.toJSON()
+        });
+      }
+      await WhatsAppClientModel.addUser(number._id, user._id);
+      assigned.push({
+        _id: number._id,
+        name: number.name,
+        phone: number.phone,
+        status: number.status
+      });
+    }
+
+    const message = assigned.length
+      ? `Client created and linked to ${assigned.length} WhatsApp number${assigned.length === 1 ? '' : 's'}.`
+      : 'Client created. Assign any OTP numbers from Numbers or Manage.';
+
     res.status(201).json({
       user: user.toJSON(),
-      message: 'User created. Assign a WhatsApp number from Numbers.'
+      assignedNumbers: assigned,
+      message
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
