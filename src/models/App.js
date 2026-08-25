@@ -6,13 +6,23 @@ const { tableExists } = require('../db/alignDiagramSchema');
 
 const mapRow = (row) => {
   if (!row) return null;
+  const title = row.number_title || row.title || '';
+  const phone = row.number_phone || row.number || '';
+  const service = row.service || null;
+  const labelParts = [title || service || 'App'];
+  if (phone) labelParts.push(`+${phone}`);
+  else if (service && title) labelParts.push(service);
   return {
     _id: row.id,
     clientId: row.client_id || row.user_id,
     otpNumberId: row.OTP_NUMBER_id || row.otp_number_id || row.phone_number_id,
-    service: row.service || null,
+    service,
     isActive: Boolean(row.Active ?? row.active ?? row.is_active),
     balance: Number(row.balance) || 0,
+    numberTitle: title || null,
+    numberPhone: phone || null,
+    numberStatus: row.number_status || row.status || null,
+    label: labelParts.join(' · '),
     createdAt: row.created_at
   };
 };
@@ -83,16 +93,29 @@ class AppModel {
 
   static async findById(id) {
     if (!id) return null;
-    const rows = await query(`SELECT * FROM ${APP} WHERE id = ? LIMIT 1`, [String(id)]);
+    const rows = await query(
+      `SELECT a.*, pn.title AS number_title, pn.number AS number_phone, pn.status AS number_status
+       FROM ${APP} a
+       LEFT JOIN ${OTP_NUMBER} pn ON pn.id = a.OTP_NUMBER_id
+       WHERE a.id = ? LIMIT 1`,
+      [String(id)]
+    );
     return mapRow(rows[0]);
   }
 
   static async listForClient(clientId, { activeOnly = false } = {}) {
     if (!clientId) return [];
-    const sql = activeOnly
-      ? `SELECT * FROM ${APP} WHERE client_id = ? AND \`Active\` = 1 ORDER BY service ASC`
-      : `SELECT * FROM ${APP} WHERE client_id = ? ORDER BY service ASC`;
-    const rows = await query(sql, [String(clientId)]);
+    const where = activeOnly
+      ? 'a.client_id = ? AND a.`Active` = 1'
+      : 'a.client_id = ?';
+    const rows = await query(
+      `SELECT a.*, pn.title AS number_title, pn.number AS number_phone, pn.status AS number_status
+       FROM ${APP} a
+       LEFT JOIN ${OTP_NUMBER} pn ON pn.id = a.OTP_NUMBER_id
+       WHERE ${where}
+       ORDER BY pn.title ASC, a.service ASC`,
+      [String(clientId)]
+    );
     return rows.map(mapRow);
   }
 

@@ -206,11 +206,14 @@ router.patch('/current-app', authMiddleware, async (req, res) => {
   try {
     const ownerId = getOwnerUserId(req.user);
     const owner = await User.findById(ownerId);
+    if (!owner) return res.status(404).json({ error: 'Client not found.' });
     if (req.user.parentUserId && req.user.source) {
       return res.status(403).json({ error: 'This login is locked to one service.' });
     }
-    if (!owner?.allowSourceSwitch) {
-      return res.status(403).json({ error: 'Switching services is not allowed for this client.' });
+
+    const apps = await App.listForClient(ownerId, { activeOnly: true });
+    if (apps.length < 2 && req.body.appId && String(req.body.appId) !== String(apps[0]?._id)) {
+      return res.status(400).json({ error: 'This client has only one App assigned.' });
     }
 
     let app = null;
@@ -233,7 +236,7 @@ router.patch('/current-app', authMiddleware, async (req, res) => {
         ...user.toJSON(),
         subscription: serializeSubscription(sub, user)
       },
-      message: `Switched to ${app.service}`
+      message: `Switched to ${app.label || app.service}`
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

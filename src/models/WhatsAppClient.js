@@ -426,7 +426,16 @@ class WhatsAppClientModel {
       }
     }
     const App = require('./App');
-    await App.assignToClient(userId, id);
+    const User = require('./User');
+    const app = await App.assignToClient(userId, id);
+    const apps = await App.listForClient(userId, { activeOnly: true });
+    const owner = await User.findById(userId);
+    if (app && (!owner?.currentAppId || apps.length === 1)) {
+      await App.setCurrent(userId, app._id);
+    }
+    if (apps.length >= 2) {
+      await User.setAllowSourceSwitch(userId, true);
+    }
     return this.findOne({ _id: id });
   }
 

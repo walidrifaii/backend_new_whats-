@@ -72,8 +72,9 @@ const getOwnerSubscription = async (userOrOwnerId) => {
     knownSources: enabledSources,
     remaining,
     sourceLimit: fromNumbers.sourceLimit,
-    allowSourceSwitch: Boolean(owner?.allowSourceSwitch),
-    currentAppId: owner?.currentAppId || null
+    allowSourceSwitch: Boolean(owner?.allowSourceSwitch) || apps.filter((item) => item.isActive).length >= 2,
+    currentAppId: owner?.currentAppId || null,
+    canLogin: numbers.length > 0
   };
 };
 
@@ -107,7 +108,8 @@ const getAccountSubscription = async (userOrId) => {
     sourceLimit: 0,
     allowSourceSwitch: Boolean(ownerSub.allowSourceSwitch) && !fresh.source,
     currentAppId: ownerSub.currentAppId,
-    sharesOwnerWhatsApp: true
+    sharesOwnerWhatsApp: true,
+    canLogin: (ownerSub.numbers || []).length > 0
   };
 };
 
@@ -127,6 +129,8 @@ const serializeSubscription = (sub, user = null) => {
         }
       : null
   );
+  const activeApps = (sub.apps || []).filter((item) => item.isActive);
+  const canSwitch = activeApps.length >= 2 && !user?.source;
   return {
     plan: mapPlan(sub.plan),
     requestedPlan: sub.status === 'pending' ? mapPlan(sub.requestedPlan) : null,
@@ -139,10 +143,10 @@ const serializeSubscription = (sub, user = null) => {
     enabledServices: catalog.filter((item) => item.enabled),
     sourceLimit,
     catalog,
-    allowSourceSwitch: Boolean(sub.allowSourceSwitch) && !user?.source,
-    canSwitchSources: Boolean(sub.allowSourceSwitch)
-      && !user?.source
-      && (enabledSources.length >= 2 || (sub.apps || []).filter((item) => item.isActive).length >= 2),
+    allowSourceSwitch: canSwitch || Boolean(sub.allowSourceSwitch),
+    canSwitchSources: canSwitch,
+    canLogin: Boolean(sub.canLogin) || (sub.numbers || []).length > 0,
+    numberCount: (sub.numbers || []).length,
     sharesOwnerWhatsApp: isService,
     currentSourceEnabled: true
   };

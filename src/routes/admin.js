@@ -301,8 +301,8 @@ router.patch('/numbers/:id/assign', async (req, res) => {
     const updated = await WhatsAppClientModel.addUser(client._id, nextUserId);
     res.json({
       number: await serializeNumber(updated),
-      message: 'Number assigned to user'
-    });
+        message: 'OTP number assigned to this client'
+      });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -441,15 +441,17 @@ router.get('/users', async (req, res) => {
       const ownerId = String(row.user_id);
       if (!phonesMap[ownerId]) phonesMap[ownerId] = [];
       if (!numbersMap[ownerId]) numbersMap[ownerId] = [];
-      numbersMap[ownerId].push({
-        _id: row.id,
-        phone: row.phone || '',
-        name: row.name || '',
-        status: row.status || '',
-        planId: row.plan_id || null,
-        planStatus: row.plan_status || 'none',
-        messageBalance: row.message_balance ?? 0
-      });
+      if (!numbersMap[ownerId].some((item) => item._id === row.id)) {
+        numbersMap[ownerId].push({
+          _id: row.id,
+          phone: row.phone || '',
+          name: row.name || '',
+          status: row.status || '',
+          planId: row.plan_id || null,
+          planStatus: row.plan_status || 'none',
+          messageBalance: row.message_balance ?? 0
+        });
+      }
       const phone = String(row.phone || '').trim();
       if (!phone || phonesMap[ownerId].some((item) => item.phone === phone)) continue;
       phonesMap[ownerId].push({

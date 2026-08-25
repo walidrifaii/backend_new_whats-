@@ -1,11 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
+const { v4: uuidv4 } = require('uuid');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
 const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildQrSharePayload } = require('../utils/qrShare');
 const { getOwnerUserId, isServiceAccount } = require('../utils/accountScope');
+const { getOwnerSubscription } = require('../utils/subscription');
+const App = require('../models/App');
 
 const rejectServiceAccountWrite = (req, res) => {
   if (!isServiceAccount(req.user)) return false;
@@ -63,17 +66,55 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /api/clients - users cannot create WhatsApp; admin assigns from the pool
+// POST /api/clients - client creates their own WhatsApp number, then scans QR
 router.post('/', authMiddleware, [
-  body('name').trim().notEmpty().withMessage('Client name is required')
+  body('name').trim().notEmpty().withMessage('Number name is required')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   if (rejectServiceAccountWrite(req, res)) return;
 
-  return res.status(403).json({
-    error: 'Only the super admin can add WhatsApp numbers. Ask admin to assign a number to your account.'
-  });
+  try {
+    const ownerId = getOwnerUserId(req.user);
+    const sub = await getOwnerSubscription(ownerId);
+    const activeApps = await App.listForClient(ownerId, { activeOnly: true });
+    const sourceLimit = Number(sub.sourceLimit || sub.plan?.sourceLimit || 0);
+    if (sourceLimit > 0 && activeApps.length >= sourceLimit) {
+      return res.status(403).json({
+        error: `Your plan allows up to ${sourceLimit} WhatsApp number(s). Ask admin to upgrade the plan or remove an unused number.`
+      });
+    }
+
+    const sessionId = `client_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+    const created = await WhatsAppClientModel.create({
+      userId: ownerId,
+      name: String(req.body.name || '').trim(),
+      clientId: sessionId,
+      sessionPath: `./sessions/${sessionId}`,
+      status: 'disconnected'
+    });
+
+    const client = await WhatsAppClientModel.findByIdAndUpdate(
+      created._id,
+      { status: 'initializing' },
+      { new: true }
+    );
+
+    res.status(201).json({
+      client,
+      message: 'WhatsApp number created. Scan the QR code to connect.'
+    });
+
+    (async () => {
+      try {
+        await createWhatsAppClient(sessionId);
+      } catch (err) {
+        console.error(`Client self-create init error for ${sessionId}:`, err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/clients/:id/connect - initialize WhatsApp connection
