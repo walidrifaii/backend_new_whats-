@@ -12,7 +12,7 @@ const { query } = require('../db/mysql');
 const { CLIENT, OTP_NUMBER, APP } = require('../db/tables');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
-const { createWhatsAppClient, isClientConnected } = require('../services/whatsappManager');
+const { createWhatsAppClient, isClientConnected, destroyClient } = require('../services/whatsappManager');
 const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser, assignPlanToNumber } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { buildQrSharePayload } = require('../utils/qrShare');
@@ -341,6 +341,27 @@ router.patch('/numbers/:id/balance', [
   }
 });
 
+// DELETE /api/admin/numbers/:id — soft-delete phone number from the pool
+router.delete('/numbers/:id', async (req, res) => {
+  try {
+    const client = await WhatsAppClientModel.findOne({ _id: req.params.id, isActive: true });
+    if (!client) return res.status(404).json({ error: 'Number not found' });
+
+    if (client.clientId) {
+      try {
+        await destroyClient(client.clientId);
+      } catch (err) {
+        console.warn(`Destroy session for ${client.clientId}:`, err.message);
+      }
+    }
+
+    await WhatsAppClientModel.softDelete(client._id);
+    res.json({ message: 'Phone number deleted', id: client._id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/users — create an owner account (optional OTP numberIds → App rows)
 router.post('/users', [
   body('name').trim().notEmpty().withMessage('Name is required'),
@@ -609,6 +630,50 @@ router.patch('/users/:id/toggle-active', async (req, res) => {
     await query(`UPDATE ${CLIENT} SET is_active = ? WHERE id = ?`, [newStatus, req.params.id]);
     const updated = await User.findById(req.params.id);
     res.json({ user: updated.toJSON() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:id — soft-delete client (and stats sub-accounts if owner)
+router.delete('/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'Client not found' });
+    if (user.role === 'admin') {
+      return res.status(400).json({ error: 'Cannot delete an admin account' });
+    }
+    if (!user.isActive) {
+      return res.json({ message: 'Client already deleted', id: user._id });
+    }
+
+    const stamp = Date.now();
+    const isOwner = !user.parentUserId;
+    const toDelete = [user];
+
+    if (isOwner) {
+      await query(`UPDATE ${APP} SET \`Active\` = 0 WHERE client_id = ?`, [String(user._id)]);
+      const children = await User.findByParentUserId(user._id);
+      toDelete.push(...children);
+    }
+
+    for (const target of toDelete) {
+      const deletedEmail = `deleted.${stamp}.${target.email}`.slice(0, 190);
+      await query(
+        `UPDATE ${CLIENT}
+         SET is_active = 0, \`current_App_id\` = NULL, email = ?
+         WHERE id = ?`,
+        [deletedEmail, String(target._id)]
+      );
+      try {
+        await TokenSession.revokeOwner('user', target._id);
+        await TokenSession.revokeOwner('client', target._id);
+      } catch (_) {
+        /* optional */
+      }
+    }
+
+    res.json({ message: 'Client deleted', id: user._id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

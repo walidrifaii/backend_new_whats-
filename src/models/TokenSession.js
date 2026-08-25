@@ -60,6 +60,14 @@ class TokenSessionModel {
       [tokenHash]
     );
   }
+
+  static async revokeOwner(ownerType, ownerId) {
+    if (!ownerType || !ownerId) return;
+    await query(
+      `UPDATE token_sessions SET is_active = 0 WHERE owner_type = ? AND owner_id = ?`,
+      [String(ownerType), String(ownerId)]
+    );
+  }
 }
 
 module.exports = TokenSessionModel;

@@ -333,6 +333,20 @@ class WhatsAppClientModel {
     return this.findOne({ _id: id });
   }
 
+  /** Soft-delete: hide from pool and stop using the session. */
+  static async softDelete(id) {
+    const current = await this.findOne({ _id: id, isActive: true });
+    if (!current) return null;
+    await this.clearUsers(id);
+    await query(
+      `UPDATE ${OTP_NUMBER}
+       SET is_active = 0, status = 'disconnected', qr_code = NULL, updated_at = NOW()
+       WHERE id = ?`,
+      [String(id)]
+    );
+    return this.findOne({ _id: id });
+  }
+
   static async decrementBalance(id, amount = 1) {
     await query(
       `UPDATE ${OTP_NUMBER}
