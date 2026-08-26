@@ -569,12 +569,54 @@ router.get('/users', async (req, res) => {
   }
 });
 
-// GET /api/admin/users/:id — single user details
+// GET /api/admin/users/:id — single user details (numbers + projects)
 router.get('/users/:id', async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json({ user: user.toJSON() });
+
+    const ownerId = user.parentUserId || user._id;
+    const owner = user.parentUserId ? await User.findById(ownerId) : user;
+    const safe = user.toJSON();
+
+    const assignedRows = await query(`
+      SELECT pn.id, pn.number AS phone, pn.title AS name, pn.status, pn.plan_id, pn.plan_status, pn.message_balance
+      FROM ${APP} a
+      INNER JOIN ${OTP_NUMBER} pn ON pn.id = a.OTP_NUMBER_id
+      WHERE a.client_id = ? AND pn.is_active = 1 AND a.\`Active\` = 1
+      ORDER BY (pn.status = 'connected') DESC, pn.created_at DESC
+    `, [ownerId]);
+
+    const assignedNumbers = [];
+    for (const row of assignedRows) {
+      if (assignedNumbers.some((item) => item._id === row.id)) continue;
+      assignedNumbers.push({
+        _id: row.id,
+        phone: row.phone || '',
+        name: row.name || '',
+        status: row.status || '',
+        planId: row.plan_id || null,
+        planStatus: row.plan_status || 'none',
+        messageBalance: row.message_balance ?? 0
+      });
+    }
+
+    const catalogMap = await UserSource.listForUsers([ownerId]);
+    safe.assignedNumbers = assignedNumbers;
+    safe.phones = assignedNumbers.map((item) => ({
+      phone: item.phone,
+      name: item.name,
+      status: item.status
+    }));
+    safe.messageBalance = assignedNumbers.reduce(
+      (sum, item) => sum + (Number(item.messageBalance) || 0),
+      0
+    );
+    safe.sourceCatalog = catalogMap[ownerId] || [];
+    safe.enabledSources = safe.sourceCatalog.filter((item) => item.enabled).map((item) => item.name);
+    safe.allowSourceSwitch = Boolean(owner?.allowSourceSwitch ?? user.allowSourceSwitch);
+
+    res.json({ user: safe });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
