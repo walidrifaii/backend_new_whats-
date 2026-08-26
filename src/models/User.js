@@ -273,6 +273,42 @@ class UserModel {
     return this.findById(userId);
   }
 
+  static async updateProfile(userId, { name, email } = {}) {
+    const user = await this.findById(userId);
+    if (!user) return null;
+
+    const nextName = name !== undefined ? String(name || '').trim() : user.name;
+    const nextEmail = email !== undefined
+      ? String(email || '').trim().toLowerCase()
+      : String(user.email || '').trim().toLowerCase();
+
+    if (!nextName) {
+      const err = new Error('Name is required');
+      err.status = 400;
+      throw err;
+    }
+    if (!nextEmail || !nextEmail.includes('@')) {
+      const err = new Error('Valid email is required');
+      err.status = 400;
+      throw err;
+    }
+
+    if (nextEmail !== String(user.email || '').trim().toLowerCase()) {
+      const existing = await this.findOne({ email: nextEmail });
+      if (existing && String(existing._id) !== String(userId)) {
+        const err = new Error('Email already registered');
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    await query(
+      `UPDATE ${CLIENT} SET name = ?, email = ? WHERE id = ?`,
+      [nextName, nextEmail, String(userId)]
+    );
+    return this.findById(userId);
+  }
+
   static async decrementBalance(userId, amount = 1) {
     await query(
       `UPDATE ${CLIENT} SET message_balance = GREATEST(message_balance - ?, 0) WHERE id = ?`,
