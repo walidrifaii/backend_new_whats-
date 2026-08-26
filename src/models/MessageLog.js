@@ -118,11 +118,9 @@ class MessageLogModel {
         ml.id, ml.client_id, ml.App_id, ml.OTP_NUMBER_id, ml.campaign_id, ml.contact_id,
         ml.phone, ml.message, ml.direction, ml.status,
         ml.whatsapp_message_id, ml.error, ml.source, ml.timestamp,
-        wc.title AS client_name, wc.number AS client_phone,
-        c.name AS campaign_name
+        wc.title AS client_name, wc.number AS client_phone
       FROM message_logs ml
       LEFT JOIN ${OTP_NUMBER} wc ON wc.id = ml.OTP_NUMBER_id
-      LEFT JOIN campaigns c ON c.id = ml.campaign_id
     `;
     if (clauses.length > 0) sql += ` WHERE ${clauses.join(' AND ')}`;
     sql += ' ORDER BY ml.timestamp DESC';
@@ -130,8 +128,6 @@ class MessageLogModel {
     const offset = Number(options.offset || 0);
     const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
     const safeOffset = Number.isFinite(offset) && offset >= 0 ? Math.floor(offset) : 0;
-    // Keep LIMIT/OFFSET as numeric literals to avoid prepared-statement
-    // argument issues on some MySQL/MariaDB deployments.
     sql += ` LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
     const rows = await query(sql, values);
@@ -141,10 +137,7 @@ class MessageLogModel {
         ...mapped,
         clientId: row.client_name
           ? { _id: mapped.clientId, name: row.client_name, phone: row.client_phone }
-          : mapped.clientId,
-        campaignId: row.campaign_name
-          ? { _id: mapped.campaignId, name: row.campaign_name }
-          : mapped.campaignId
+          : mapped.clientId
       };
     });
   }
@@ -182,14 +175,8 @@ class MessageLogModel {
        WHERE client_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
       [String(userId)]
     );
-    const campaignRows = await query(
-      `SELECT DISTINCT source AS source
-       FROM campaigns
-       WHERE client_id = ? AND source IS NOT NULL AND TRIM(source) != ''`,
-      [String(userId)]
-    );
     return [...new Set(
-      [...logRows, ...campaignRows]
+      logRows
         .map((row) => String(row.source || '').trim())
         .filter((name) => name && name !== '_untagged')
     )].sort();

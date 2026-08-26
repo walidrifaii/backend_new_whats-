@@ -9,8 +9,6 @@ const { alignDiagramSchema } = require('./db/alignDiagramSchema');
 
 const authRoutes     = require('./routes/auth');
 const clientRoutes   = require('./routes/clients');
-const campaignRoutes = require('./routes/campaigns');
-const contactRoutes  = require('./routes/contacts');
 const messageRoutes  = require('./routes/messages');
 const otpRoutes      = require('./routes/otp');
 const logRoutes      = require('./routes/logs');
@@ -21,13 +19,10 @@ const User                = require('./models/User');
 const UserSource          = require('./models/UserSource');
 const Plan                = require('./models/Plan');
 const WhatsAppClientModel = require('./models/WhatsAppClient');
-const Campaign            = require('./models/Campaign');
 const MessageLog          = require('./models/MessageLog');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
-const MessageJob = require('./models/MessageJob');
 const { initWhatsAppManager, destroyAllClients } = require('./services/whatsappManager');
-const { resumeInterruptedJobs } = require('./services/messageJobQueue');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -72,8 +67,6 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 app.use('/api/auth',      authRoutes);
 app.use('/api/clients',   clientRoutes);
-app.use('/api/campaigns', campaignRoutes);
-app.use('/api/contacts',  contactRoutes);
 app.use('/api/messages',  messageRoutes);
 app.use('/api/otp',       otpRoutes);
 app.use('/api/logs',      logRoutes);
@@ -232,27 +225,16 @@ testConnection()
     const App = require('./models/App');
     await App.ensureTable();
     await UserSource.ensureTable();
-    await MessageJob.ensureTables();
     await MessageLog.ensureSourceColumn();
-    await Campaign.ensureSourceColumn();
     console.log('✅ MySQL connected');
 
     server.listen(process.env.PORT || 5000, () => {
       console.log(`🚀 Server running on port ${process.env.PORT || 5000}`);
     });
 
-    // Start WhatsApp restore after server is listening, then resume bulk jobs
-    initWhatsAppManager()
-      .then(() => {
-        setTimeout(() => {
-          resumeInterruptedJobs().catch((err) => {
-            console.warn('Could not resume interrupted bulk jobs:', err.message);
-          });
-        }, 15000);
-      })
-      .catch((err) => {
-        console.error('WhatsApp manager init error:', err);
-      });
+    initWhatsAppManager().catch((err) => {
+      console.error('WhatsApp manager init error:', err);
+    });
   })
   .catch(err => {
     console.error('❌ MySQL connection error:', err);
