@@ -41,6 +41,8 @@ router.get('/', authMiddleware, async (req, res) => {
     const filter = { userId: ownerId };
     const source = getLockedSource(req.user) || normalizeMessageSource(req.query.source);
     if (source) filter.source = source;
+    const otpNumberId = String(req.query.clientId || req.query.otpNumberId || '').trim();
+    if (otpNumberId) filter.clientId = otpNumberId;
     const campaigns = await Campaign.find(filter, { sort: { createdAt: -1 } });
     const clients = await WhatsAppClientModel.find({ userId: getOwnerUserId(req.user), isActive: true });
     const clientsById = new Map(clients.map((c) => [c._id, c]));
@@ -48,7 +50,7 @@ router.get('/', authMiddleware, async (req, res) => {
       ...campaign,
       clientId: clientsById.get(campaign.clientId) || campaign.clientId
     }));
-    res.json({ campaigns: hydratedCampaigns });
+    res.json({ campaigns: hydratedCampaigns.map((c) => formatCampaign(c)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
