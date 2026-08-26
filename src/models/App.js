@@ -9,9 +9,11 @@ const mapRow = (row) => {
   const title = row.number_title || row.title || '';
   const phone = row.number_phone || row.number || '';
   const service = row.service || null;
-  const labelParts = [title || service || 'App'];
+  const labelParts = [];
+  if (service) labelParts.push(service);
+  if (title && title.toLowerCase() !== String(service || '').toLowerCase()) labelParts.push(title);
   if (phone) labelParts.push(`+${phone}`);
-  else if (service && title) labelParts.push(service);
+  if (labelParts.length === 0) labelParts.push('App');
   return {
     _id: row.id,
     clientId: row.client_id || row.user_id,

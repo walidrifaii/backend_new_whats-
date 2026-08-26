@@ -914,10 +914,14 @@ router.post('/users/:id/sources', async (req, res) => {
     await bindNumberToOwner(ownerId, phoneNumberId);
     await UserSource.upsert(ownerId, req.body.source, { enabled, phoneNumberId });
     const owner = await User.findById(ownerId);
+    const apps = await require('../models/App').listForClient(ownerId, { activeOnly: true });
+    if (apps.length >= 2) {
+      await User.setAllowSourceSwitch(ownerId, true);
+    }
     const payload = await ownerSourcesPayload(owner);
     res.status(201).json({
       ...payload,
-      message: `Added service ${normalizeMessageSource(req.body.source)}`
+      message: `Added project ${normalizeMessageSource(req.body.source)}`
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

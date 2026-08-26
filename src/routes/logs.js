@@ -21,10 +21,15 @@ router.get('/', authMiddleware, async (req, res) => {
     const sub = await getOwnerSubscription(req.user);
     const otpNumberId = String(clientId || '').trim();
 
-    // Prefer OTP number filter (multi-number switch). Skip source catalog when number is set.
+    // Number and/or project (source) filters can combine:
+    // same WhatsApp line + projects y/z → clientId + source
     if (otpNumberId) {
       filter.clientId = otpNumberId;
-    } else {
+    }
+    const requestedSource = String(source || '').trim();
+    if (requestedSource) {
+      applySourceScope(filter, req.user, requestedSource, null);
+    } else if (!otpNumberId) {
       applySourceScope(filter, req.user, source, viewSourcesFor(sub));
     }
 
@@ -54,9 +59,13 @@ router.get('/stats', authMiddleware, async (req, res) => {
     const sub = await getOwnerSubscription(req.user);
     const viewSources = viewSourcesFor(sub);
     const otpNumberId = String(clientId || '').trim();
+    const requestedSource = String(source || '').trim();
     if (otpNumberId) {
       filter.clientId = otpNumberId;
-    } else {
+    }
+    if (requestedSource) {
+      applySourceScope(filter, req.user, requestedSource, null);
+    } else if (!otpNumberId) {
       applySourceScope(filter, req.user, source, viewSources);
     }
 
@@ -66,9 +75,10 @@ router.get('/stats', authMiddleware, async (req, res) => {
       ? sub.enabledSources
       : await MessageLog.listKnownSources(ownerId);
     const bySourceFilter = { userId: ownerId };
-    if (otpNumberId) {
-      bySourceFilter.clientId = otpNumberId;
-    } else {
+    if (otpNumberId) bySourceFilter.clientId = otpNumberId;
+    if (requestedSource) {
+      applySourceScope(bySourceFilter, req.user, requestedSource, null);
+    } else if (!otpNumberId) {
       applySourceScope(bySourceFilter, req.user, null, viewSources);
     }
     const bySource = await MessageLog.getStatsBySource(bySourceFilter);
