@@ -178,23 +178,6 @@ class WhatsAppClientModel {
     `);
   }
 
-  static async ensureAssignmentTable() {
-    if (await this.tableExists('phone_number_users')) return;
-    try {
-      await query(`
-        CREATE TABLE IF NOT EXISTS phone_number_users (
-          phone_number_id CHAR(24) NOT NULL,
-          user_id CHAR(24) NOT NULL,
-          assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (phone_number_id, user_id),
-          KEY idx_phone_number_users_user_id (user_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
-    } catch (err) {
-      if (!ignoreDup(err) && err.code !== 'ER_TABLE_EXISTS_ERROR') throw err;
-    }
-  }
-
   static async ensurePoolColumns() {
     await this.ensureTable();
 
@@ -215,8 +198,6 @@ class WhatsAppClientModel {
         if (!ignoreDup(err)) throw err;
       }
     }
-
-    await this.ensureAssignmentTable();
   }
 
   static assignmentJoin(filter = {}) {
@@ -428,17 +409,6 @@ class WhatsAppClientModel {
   }
 
   static async addUser(id, userId) {
-    if (await this.tableExists('phone_number_users')) {
-      try {
-        await query(
-          `INSERT IGNORE INTO phone_number_users (phone_number_id, user_id, assigned_at)
-           VALUES (?, ?, NOW())`,
-          [String(id), String(userId)]
-        );
-      } catch (_) {
-        /* assignment is stored on App */
-      }
-    }
     const App = require('./App');
     const User = require('./User');
     const app = await App.assignToClient(userId, id);
@@ -454,32 +424,12 @@ class WhatsAppClientModel {
   }
 
   static async removeUser(id, userId) {
-    if (await this.tableExists('phone_number_users')) {
-      try {
-        await query(
-          `DELETE FROM phone_number_users WHERE phone_number_id = ? AND user_id = ?`,
-          [String(id), String(userId)]
-        );
-      } catch (_) {
-        /* assignment is stored on App */
-      }
-    }
     const App = require('./App');
     await App.deactivateForAssignment(userId, id);
     return this.findOne({ _id: id });
   }
 
   static async clearUsers(id) {
-    if (await this.tableExists('phone_number_users')) {
-      try {
-        await query(
-          `DELETE FROM phone_number_users WHERE phone_number_id = ?`,
-          [String(id)]
-        );
-      } catch (_) {
-        /* assignment is stored on App */
-      }
-    }
     const App = require('./App');
     await App.deactivateForAssignment(null, id);
     return this.findOne({ _id: id });

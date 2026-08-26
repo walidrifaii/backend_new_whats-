@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS plan (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- App: id, client_id, OTP_NUMBER_id, service, Active, balance, created_at
-CREATE TABLE IF NOT EXISTS `App` (
+-- phone_number_users: client ↔ number ↔ project (formerly App)
+CREATE TABLE IF NOT EXISTS phone_number_users (
   id CHAR(24) NOT NULL,
   client_id CHAR(24) NOT NULL,
   `OTP_NUMBER_id` CHAR(24) NOT NULL,
@@ -52,20 +52,20 @@ CREATE TABLE IF NOT EXISTS `App` (
   balance INT NULL DEFAULT 0,
   created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_app_client_service (client_id, service),
-  KEY idx_app_otp_number (`OTP_NUMBER_id`),
-  KEY idx_app_client (client_id),
-  CONSTRAINT fk_app_client
+  UNIQUE KEY uq_pnu_client_number_service (client_id, `OTP_NUMBER_id`, service),
+  KEY idx_pnu_otp_number (`OTP_NUMBER_id`),
+  KEY idx_pnu_client (client_id),
+  CONSTRAINT fk_pnu_client
     FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT fk_app_otp_number
+  CONSTRAINT fk_pnu_otp_number
     FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ALTER TABLE client
   ADD CONSTRAINT fk_client_current_app
-    FOREIGN KEY (`current_App_id`) REFERENCES `App` (id)
+    FOREIGN KEY (`current_App_id`) REFERENCES phone_number_users (id)
     ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- subscription: id, client_id, plan_id, credits, amount, Active, created_at
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_campaigns_app
-    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    FOREIGN KEY (`App_id`) REFERENCES phone_number_users (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_campaigns_otp
     FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS message_logs (
     FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_logs_app
-    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    FOREIGN KEY (`App_id`) REFERENCES phone_number_users (id)
     ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT fk_message_logs_otp
     FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS message_jobs (
     FOREIGN KEY (client_id) REFERENCES client (id)
     ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_message_jobs_app
-    FOREIGN KEY (`App_id`) REFERENCES `App` (id)
+    FOREIGN KEY (`App_id`) REFERENCES phone_number_users (id)
     ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT fk_message_jobs_otp
     FOREIGN KEY (`OTP_NUMBER_id`) REFERENCES `OTP_NUMBER` (id)

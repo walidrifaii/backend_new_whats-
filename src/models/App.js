@@ -13,7 +13,7 @@ const mapRow = (row) => {
   if (service) labelParts.push(service);
   if (title && title.toLowerCase() !== String(service || '').toLowerCase()) labelParts.push(title);
   if (phone) labelParts.push(`+${phone}`);
-  if (labelParts.length === 0) labelParts.push('App');
+  if (labelParts.length === 0) labelParts.push('Assignment');
   return {
     _id: row.id,
     clientId: row.client_id || row.user_id,
@@ -29,6 +29,7 @@ const mapRow = (row) => {
   };
 };
 
+/** phone_number_users: client ↔ OTP number ↔ project (service). JS module kept as App. */
 class AppModel {
   static async ensureTable() {
     await query(`
@@ -41,33 +42,13 @@ class AppModel {
         balance INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        UNIQUE KEY uq_app_client_number_service (client_id, OTP_NUMBER_id, service),
-        KEY idx_app_otp_number_id (OTP_NUMBER_id),
-        KEY idx_app_client_id (client_id)
+        UNIQUE KEY uq_pnu_client_number_service (client_id, OTP_NUMBER_id, service),
+        KEY idx_pnu_otp_number_id (OTP_NUMBER_id),
+        KEY idx_pnu_client_id (client_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
-    await this.syncFromAssignments();
     await this.syncFromSources();
-  }
-
-  static async syncFromAssignments() {
-    if (!(await tableExists('phone_number_users'))) return;
-    const otpTable = (await tableExists('OTP_NUMBER')) ? OTP_NUMBER : 'phone_numbers';
-    try {
-      const rows = await query(`
-        SELECT pnu.user_id, pnu.phone_number_id, pn.message_balance
-        FROM phone_number_users pnu
-        INNER JOIN ${otpTable} pn ON pn.id = pnu.phone_number_id
-      `);
-      for (const row of rows) {
-        await this.assignToClient(row.user_id, row.phone_number_id, {
-          balance: Number(row.message_balance) || 0
-        });
-      }
-    } catch (err) {
-      console.warn('App.syncFromAssignments skipped:', err.message);
-    }
   }
 
   static async syncFromSources() {
@@ -161,7 +142,7 @@ class AppModel {
     });
   }
 
-  /** Keep App.balance in sync when admin tops up an OTP number. */
+  /** Keep phone_number_users.balance in sync when admin tops up an OTP number. */
   static async setBalanceForOtpNumber(otpNumberId, balance) {
     if (!otpNumberId) return;
     const value = Math.max(0, parseInt(balance, 10) || 0);

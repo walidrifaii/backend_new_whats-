@@ -2,10 +2,10 @@ Project whatsapp_saas {
   database_type: "MySQL"
   Note: '''
     Super admin creates OTP_NUMBER (phone).
-    Super admin assigns that phone to one or many clients.
+    Super admin assigns that phone to one or many clients via phone_number_users.
     One phone → many clients. One client → many phones.
-    App is the assignment + service: client + phone + service name.
-    A client can have many Apps and switch with current_App_id.
+    phone_number_users = assignment + project: client + phone + service name.
+    A client can have many rows and switch with current_App_id.
   '''
 }
 
@@ -66,7 +66,7 @@ Enum number_status {
 TableGroup core {
   client
   OTP_NUMBER
-  App
+  phone_number_users
   plan
   subscription
 }
@@ -108,10 +108,10 @@ Table OTP_NUMBER {
   is_active boolean [default: true]
   created_at datetime
 
-  Note: "WhatsApp line. Clients reach it only through App"
+  Note: "WhatsApp line. Clients reach it only through phone_number_users"
 }
 
-Table App {
+Table phone_number_users {
   id char(24) [pk]
   client_id char(24) [not null]
   OTP_NUMBER_id char(24) [not null]
@@ -121,12 +121,12 @@ Table App {
   created_at datetime
 
   indexes {
-    (client_id, OTP_NUMBER_id, service) [unique, name: 'uq_app_client_number_service']
+    (client_id, OTP_NUMBER_id, service) [unique, name: 'uq_pnu_client_number_service']
     (OTP_NUMBER_id)
     (client_id)
   }
 
-  Note: "Assign phone to client here. Many phones × many clients. Client switches between App rows"
+  Note: "Assign phone to client here. Many phones × many clients. Project = service column"
 }
 
 Table plan {
@@ -263,28 +263,28 @@ Table token_sessions {
 
 // ---------------- relationships ----------------
 
-Ref: App.client_id > client.id
-Ref: App.OTP_NUMBER_id > OTP_NUMBER.id
-Ref: client.current_App_id > App.id
+Ref: phone_number_users.client_id > client.id
+Ref: phone_number_users.OTP_NUMBER_id > OTP_NUMBER.id
+Ref: client.current_App_id > phone_number_users.id
 
 Ref: subscription.client_id > client.id
 Ref: subscription.plan_id > plan.id
 
 Ref: campaigns.client_id > client.id
-Ref: campaigns.App_id > App.id
+Ref: campaigns.App_id > phone_number_users.id
 Ref: campaigns.OTP_NUMBER_id > OTP_NUMBER.id
 
 Ref: contacts.client_id > client.id
 Ref: contacts.campaign_id > campaigns.id
 
 Ref: message_logs.client_id > client.id
-Ref: message_logs.App_id > App.id
+Ref: message_logs.App_id > phone_number_users.id
 Ref: message_logs.OTP_NUMBER_id > OTP_NUMBER.id
 Ref: message_logs.campaign_id > campaigns.id
 Ref: message_logs.contact_id > contacts.id
 
 Ref: message_jobs.client_id > client.id
-Ref: message_jobs.App_id > App.id
+Ref: message_jobs.App_id > phone_number_users.id
 Ref: message_jobs.OTP_NUMBER_id > OTP_NUMBER.id
 
 Ref: message_job_items.job_id > message_jobs.id

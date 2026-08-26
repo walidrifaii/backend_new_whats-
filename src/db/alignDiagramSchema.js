@@ -102,16 +102,53 @@ const migrateOwnerAndNumberColumns = async (table) => {
 };
 
 /**
- * Make the live DB use the same table/field names as schema.dbml.
+ * Rename rich assignment table App/apps → phone_number_users.
+ * Drops the old thin phone_number_users (user_id + phone_number_id only).
+ */
+const migrateAppToPhoneNumberUsers = async () => {
+  const hasPnu = await tableExists('phone_number_users');
+  const pnuIsThin = hasPnu && !(await columnExists('phone_number_users', 'service'));
+
+  if (pnuIsThin) {
+    await dropForeignKeys('phone_number_users');
+    await renameTable('phone_number_users', 'phone_number_users_legacy');
+  }
+
+  if (await tableExists('App')) {
+    await dropForeignKeys('App');
+    if (await tableExists('phone_number_users') && (await columnExists('phone_number_users', 'service'))) {
+      await run('DROP TABLE IF EXISTS `App`');
+    } else if (!(await tableExists('phone_number_users'))) {
+      await renameTable('App', 'phone_number_users');
+    } else {
+      await renameTable('phone_number_users', 'phone_number_users_legacy');
+      await renameTable('App', 'phone_number_users');
+    }
+  } else if (await tableExists('apps')) {
+    await dropForeignKeys('apps');
+    if (await tableExists('phone_number_users') && (await columnExists('phone_number_users', 'service'))) {
+      await run('DROP TABLE IF EXISTS apps');
+    } else if (!(await tableExists('phone_number_users'))) {
+      await renameTable('apps', 'phone_number_users');
+    } else {
+      await renameTable('phone_number_users', 'phone_number_users_legacy');
+      await renameTable('apps', 'phone_number_users');
+    }
+  }
+
+  await run('DROP TABLE IF EXISTS phone_number_users_legacy');
+};
+
+/**
+ * Align live DB names. Assignment table is phone_number_users (was App).
  * Extra WhatsApp columns (session_id, tokens, plan_status) are kept so the app still runs.
  */
 const alignDiagramSchema = async () => {
-  for (const table of ['campaigns', 'message_logs', 'message_jobs', 'message_job_items', 'contacts', 'apps', 'App']) {
+  for (const table of ['campaigns', 'message_logs', 'message_jobs', 'message_job_items', 'contacts', 'apps', 'App', 'phone_number_users']) {
     await dropForeignKeys(table);
   }
   await dropForeignKeys('phone_numbers');
   await dropForeignKeys('OTP_NUMBER');
-  await dropForeignKeys('phone_number_users');
   await dropForeignKeys('user_sources');
   await dropForeignKeys('users');
   await dropForeignKeys('client');
@@ -150,9 +187,12 @@ const alignDiagramSchema = async () => {
     await addColumn(userTable, 'current_App_id', 'CHAR(24) NULL');
   }
 
-  const appTable = (await tableExists('apps'))
-    ? 'apps'
-    : ((await tableExists('App')) ? 'App' : null);
+  let appTable = null;
+  if (await tableExists('apps')) appTable = 'apps';
+  else if (await tableExists('App')) appTable = 'App';
+  else if (await tableExists('phone_number_users') && (await columnExists('phone_number_users', 'service'))) {
+    appTable = 'phone_number_users';
+  }
   if (appTable) {
     await renameColumn(appTable, 'user_id', 'client_id', 'CHAR(24) NOT NULL');
     await renameColumn(appTable, 'phone_number_id', 'OTP_NUMBER_id', 'CHAR(24) NOT NULL');
@@ -171,7 +211,7 @@ const alignDiagramSchema = async () => {
   await renameTable('users', 'client');
   await renameTable('phone_numbers', '`OTP_NUMBER`');
   await renameTable('plans', 'plan');
-  await renameTable('apps', '`App`');
+  await migrateAppToPhoneNumberUsers();
 
   await run(`
     CREATE TABLE IF NOT EXISTS subscription (
@@ -188,7 +228,7 @@ const alignDiagramSchema = async () => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
-  console.log('✅ Database tables aligned with dbdiagram (client, OTP_NUMBER, App, plan, subscription)');
+  console.log('✅ Database tables aligned (client, OTP_NUMBER, phone_number_users, plan, subscription)');
 };
 
-module.exports = { alignDiagramSchema, tableExists, columnExists };
+module.exports = { alignDiagramSchema, tableExists, columnExists, migrateAppToPhoneNumberUsers };
