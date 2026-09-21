@@ -123,16 +123,31 @@ const getProfileDir = (clientId) => {
 };
 
 /**
- * A valid session exists when the "Default" sub-dir is present.
- * (It holds IndexedDB / cookies / WhatsApp auth keys.)
+ * A reusable WhatsApp login exists when web.whatsapp.com IndexedDB is present.
+ * Chromium always creates a `Default/` folder on first launch, even for an unscanned QR,
+ * so that folder alone is NOT a saved session.
  */
 const sessionExistsOnDisk = (clientId) => {
-  const profileDir = getProfileDir(clientId);
-  if (fs.existsSync(path.join(profileDir, 'Default'))) return true;
-  if (fs.existsSync(path.join(profileDir, '.wwebjs_auth'))) return true;
-  const nested = path.join(SESSIONS_DIR, `session-${clientId}`);
-  if (fs.existsSync(path.join(nested, '.wwebjs_auth'))) return true;
-  if (fs.existsSync(path.join(nested, 'Default'))) return true;
+  const dirs = [
+    getProfileDir(clientId),
+    path.join(SESSIONS_DIR, `session-${clientId}`),
+    path.join(SESSIONS_DIR, clientId),
+  ];
+  const seen = new Set();
+
+  for (const profileDir of dirs) {
+    if (!profileDir || seen.has(profileDir)) continue;
+    seen.add(profileDir);
+    if (!fs.existsSync(profileDir)) continue;
+    if (fs.existsSync(path.join(profileDir, '.wwebjs_auth'))) return true;
+
+    const idbRoot = path.join(profileDir, 'Default', 'IndexedDB');
+    if (!fs.existsSync(idbRoot)) continue;
+    try {
+      const names = fs.readdirSync(idbRoot);
+      if (names.some((n) => n.toLowerCase().includes('whatsapp'))) return true;
+    } catch (_) { /* ignore unreadable profile */ }
+  }
   return false;
 };
 
@@ -413,6 +428,10 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     }
   }
 
+  const existingDb = await WhatsAppClientModel.findOne({ clientId });
+  const hadSavedSession = sessionExistsOnDisk(clientId);
+  const hadAuthenticatedSession = hadSavedSession && Boolean(existingDb?.phone);
+
   console.log(`🔧 Init ${clientId} (attempt ${attempt}/${maxRetries + 1})`);
 
   if ((forceReauth || sessionMissing) && attempt === 1) {
@@ -523,6 +542,15 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     const meta = getQrMeta(clientId);
     if (meta.releasing) return;
 
+    if (restoring) {
+      console.warn(
+        `⚠️  ${clientId}: saved session expired during restore — disconnect (scan from Open/Share)`
+      );
+      instanceAborted = true;
+      await releaseQrPendingClient(clientId, 'expired session during restore');
+      return;
+    }
+
     startQrPendingTimer(clientId);
 
     const now = Date.now();
@@ -544,9 +572,9 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     meta.handling = true;
     try {
       const nextCount = meta.refreshCount + 1;
-      if (nextCount === 1 && sessionExistsOnDisk(clientId)) {
+      if (nextCount === 1 && hadAuthenticatedSession && !forceReauth && !sessionMissing) {
         console.warn(
-          `⚠️  ${clientId}: QR despite saved session — auth may be expired or another client uses this number`
+          `⚠️  ${clientId}: previous WhatsApp login expired — scan the QR on Open/Share to reconnect`
         );
       }
       console.log(`📱 QR for ${clientId} (#${nextCount})`);
