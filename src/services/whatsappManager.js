@@ -651,17 +651,24 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
 
   try {
   const chromePath = getChromePath();
+  // Keep Chromium args conservative — aggressive memory limits break WhatsApp after QR scan
+  // (authenticated loops + inject "Execution context was destroyed" + LOGOUT).
   const puppeteerConfig = {
     headless: true,
     args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
-      '--disable-gpu', '--disable-extensions', '--disable-background-networking',
-      '--disable-sync', '--mute-audio', '--disable-default-apps',
-      '--disable-translate', '--disable-component-update',
-      '--renderer-process-limit=1',
-      '--disk-cache-size=33554432', '--media-cache-size=33554432',
-      '--js-flags=--max-old-space-size=256',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--mute-audio',
+      '--disable-default-apps',
+      '--disable-translate',
+      '--disable-component-update',
+      '--disk-cache-size=67108864',
     ],
   };
   if (chromePath) {
@@ -672,14 +679,17 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   const wClient = new Client({
     authStrategy: new LocalAuth({ clientId, dataPath: SESSIONS_DIR }),
     puppeteer: puppeteerConfig,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 10000,
+    // false: do not fight another WhatsApp Web session (that causes auth→LOGOUT loops).
+    takeoverOnConflict: false,
+    authTimeoutMs: 0,
+    qrMaxRetries: 10,
   });
 
   let initSettled      = false;
   let initTimeoutHandle = null;
   let readyHandled     = false;
   let instanceAborted  = false;
+  let authHandled      = false;
 
   const settleInit = () => {
     if (initSettled) return;
@@ -867,13 +877,17 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   });
 
   wClient.on('authenticated', async () => {
+    // WhatsApp Web can emit authenticated many times during inject/navigation — handle once.
+    if (authHandled || instanceAborted) return;
+    authHandled = true;
+
     const meta = getQrMeta(clientId);
     meta.authenticated = true;
     if (meta.pendingTimer) {
       clearTimeout(meta.pendingTimer);
       meta.pendingTimer = null;
     }
-    console.log(`🔑 Authenticated: ${clientId} — waiting for ready (keep Chromium alive)`);
+    console.log(`🔑 Authenticated: ${clientId} — waiting for ready (keep Chromium alive, do not rescan)`);
     try {
       await WhatsAppClientModel.findOneAndUpdate(
         { clientId },
@@ -895,6 +909,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     finishInitializing(clientId);
     console.error(`🔐 Auth failure for ${clientId}:`, msg);
     activeClients.delete(clientId);
+    await sleep(500);
     try { await wClient.destroy(); } catch (_) {}
     clearClientSessionData(clientId);
     await WhatsAppClientModel.findOneAndUpdate(
@@ -910,14 +925,17 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   });
 
   wClient.on('disconnected', async (reason) => {
+    const wasAuthenticating = authHandled && !readyHandled;
     instanceAborted = true;
     settleInit();
+    const viewerWasActive = isQrViewerActive(qrMeta.get(clientId));
     clearQrMeta(clientId);
     finishInitializing(clientId);
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
 
-    // Stop Chromium before deleting session files (avoids ENOTEMPTY on Cache_Data).
+    // Let in-flight inject() promises fail quietly before closing the browser.
+    await sleep(800);
     try { await wClient.destroy(); } catch (_) {}
 
     if (shouldKeepConnectedOnDisconnect(clientId)) {
@@ -933,25 +951,40 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     const wasLinked = Boolean(normalizePhone(dbBefore?.phone));
 
     const logout = isLogoutDisconnect(reason);
-    if (logout) {
-      console.warn(`🗑️  ${clientId}: clearing expired session after ${reason}`);
+    if (logout || wasAuthenticating) {
+      console.warn(`🗑️  ${clientId}: clearing session after ${reason}`);
       await sleep(400);
       clearClientSessionData(clientId);
     }
 
     const statusUpdate = { status: 'disconnected', qrCode: null };
-    if (logout) statusUpdate.phone = '';
+    if (logout || wasAuthenticating) statusUpdate.phone = '';
 
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, statusUpdate);
     emitToClient(clientId, 'disconnected', { clientId, reason });
 
-    // Skip email for QR-only LOGOUT (never linked). Still notify if a linked number logged out.
-    if (!skipEmail && (!logout || wasLinked)) {
+    if (!skipEmail && (!logout || wasLinked) && !wasAuthenticating) {
       notifyWhatsAppDisconnected({
         clientId,
         reason: String(reason || 'disconnected'),
         eventType: 'disconnected'
       });
+    }
+
+    // QR scanned but WhatsApp logged out before ready (other linked device / conflict).
+    // If Open/Share is still open, offer one clean QR restart after a short pause.
+    if (wasAuthenticating && viewerWasActive && logout) {
+      console.warn(
+        `♻️  ${clientId}: scan did not finish (LOGOUT before ready). ` +
+        `Unlink this number from other WhatsApp Web sessions, then scan again.`
+      );
+      clearQrAutoRestartBlock(clientId);
+      setTimeout(() => {
+        if (activeClients.has(clientId) || initializingClients.has(clientId)) return;
+        createWhatsAppClient(clientId, { sessionMissing: true }).catch((e) =>
+          console.error(`Post-logout QR restart failed for ${clientId}:`, e.message)
+        );
+      }, 5000);
     }
   });
 

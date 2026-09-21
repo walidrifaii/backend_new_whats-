@@ -26,9 +26,30 @@ const { initWhatsAppManager, destroyAllClients, requestQrForClient } = require('
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '');
+  // Expected while WhatsApp Web navigates / Chromium closes after QR or LOGOUT.
+  if (
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('Target closed') ||
+    msg.includes('TargetCloseError') ||
+    msg.includes('Session closed') ||
+    msg.includes('detached Frame')
+  ) {
+    console.warn('Suppressed puppeteer teardown rejection:', msg.split('\n')[0]);
+    return;
+  }
   console.error('Unhandled promise rejection:', reason);
 });
 process.on('uncaughtException', (error) => {
+  const msg = String(error?.message || error || '');
+  if (
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('Target closed') ||
+    msg.includes('detached Frame')
+  ) {
+    console.warn('Suppressed puppeteer teardown exception:', msg.split('\n')[0]);
+    return;
+  }
   console.error('Uncaught exception:', error);
 });
 
