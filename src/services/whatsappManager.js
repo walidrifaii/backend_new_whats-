@@ -218,16 +218,55 @@ const isProfileLockError = (err) => {
   );
 };
 
-/** Completely wipes session data. Only used for forceReauth / sessionMissing. */
+/** Completely wipes session data. Only used for forceReauth / sessionMissing / LOGOUT. */
 const clearClientSessionData = (clientId) => {
-  const dir = getProfileDir(clientId);
-  try {
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true });
+  const targets = [
+    getProfileDir(clientId),
+    path.join(SESSIONS_DIR, `session-${clientId}`),
+    path.join(SESSIONS_DIR, clientId),
+  ];
+  const seen = new Set();
+
+  for (const dir of targets) {
+    if (!dir || seen.has(dir) || !fs.existsSync(dir)) continue;
+    seen.add(dir);
+
+    // Rename first so a dying Chromium cannot keep writing into the live path.
+    let toDelete = dir;
+    const trash = `${dir}.trash-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    try {
+      fs.renameSync(dir, trash);
+      toDelete = trash;
+    } catch (_) { /* locked — delete in place */ }
+
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        fs.rmSync(toDelete, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const start = Date.now();
+        while (Date.now() - start < 250 * attempt) { /* brief backoff */ }
+      }
+    }
+
+    if (lastErr && fs.existsSync(toDelete)) {
+      try {
+        const { execSync } = require('child_process');
+        execSync(`rm -rf -- ${JSON.stringify(toDelete)}`, { stdio: 'ignore' });
+        lastErr = null;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    if (lastErr) {
+      console.error(`Failed to clear session for ${clientId}:`, lastErr.message);
+    } else {
       console.log(`🗑️  Cleared session for ${clientId}`);
     }
-  } catch (e) {
-    console.error(`Failed to clear session for ${clientId}:`, e.message);
   }
 };
 
@@ -431,6 +470,12 @@ const requestQrForClient = async (clientId) => {
   if (isClientStarting(clientId)) {
     markQrPageViewed(clientId);
     return { ok: true, active: true };
+  }
+
+  // QR already saved — keep Chromium/page alive, do not start a second browser.
+  if (db.status === 'qr_ready' && db.qrCode) {
+    markQrPageViewed(clientId);
+    return { ok: true, active: true, hasQr: true };
   }
 
   markQrPageViewed(clientId);
@@ -797,6 +842,9 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     console.log(`🔌 ${clientId} disconnected: ${reason}`);
     activeClients.delete(clientId);
 
+    // Stop Chromium before deleting session files (avoids ENOTEMPTY on Cache_Data).
+    try { await wClient.destroy(); } catch (_) {}
+
     if (shouldKeepConnectedOnDisconnect(clientId)) {
       console.log(`💾 ${clientId}: deploy shutdown — keeping connected status for auto-restore`);
       clientsSkippingDisconnectEmail.delete(clientId);
@@ -806,9 +854,13 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     const skipEmail = clientsSkippingDisconnectEmail.has(clientId);
     clientsSkippingDisconnectEmail.delete(clientId);
 
+    const dbBefore = await WhatsAppClientModel.findOne({ clientId });
+    const wasLinked = Boolean(normalizePhone(dbBefore?.phone));
+
     const logout = isLogoutDisconnect(reason);
     if (logout) {
       console.warn(`🗑️  ${clientId}: clearing expired session after ${reason}`);
+      await sleep(400);
       clearClientSessionData(clientId);
     }
 
@@ -818,7 +870,8 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     await WhatsAppClientModel.findOneAndUpdate({ clientId }, statusUpdate);
     emitToClient(clientId, 'disconnected', { clientId, reason });
 
-    if (!skipEmail) {
+    // Skip email for QR-only LOGOUT (never linked). Still notify if a linked number logged out.
+    if (!skipEmail && (!logout || wasLinked)) {
       notifyWhatsAppDisconnected({
         clientId,
         reason: String(reason || 'disconnected'),
