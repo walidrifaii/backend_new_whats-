@@ -299,18 +299,40 @@ const markQrPageViewed = (clientId) => {
 /**
  * Called from the public Open/Share QR page.
  * Restarts Chromium when a previous QR timed out so the page is not stuck on "waiting".
+ * Never touch a live connected session — page auto-refresh must not kill/reinit Chromium.
  */
 const requestQrForClient = async (clientId) => {
-  markQrPageViewed(clientId);
-
   const db = await WhatsAppClientModel.findOne({ clientId, isActive: true });
   if (!db) return { ok: false, reason: 'not_found' };
-  if (db.status === 'connected' && activeClients.has(clientId)) {
-    return { ok: true, connected: true };
+
+  // Already linked: stop QR timers and leave Chromium alone (share-page refresh used to
+  // re-arm the abandon timer and destroy the session → connected + reconnecting loop).
+  if (db.status === 'connected') {
+    clearQrMeta(clientId);
+    if (activeClients.has(clientId)) {
+      return { ok: true, connected: true };
+    }
+    if (isClientStarting(clientId)) {
+      return { ok: true, connected: true, active: true };
+    }
+    // DB says connected but browser died — silent restore, do not flip to initializing/QR.
+    const lastStart = lastQrStartAt.get(clientId) || 0;
+    if (Date.now() - lastStart >= QR_RESTART_COOLDOWN_MS) {
+      lastQrStartAt.set(clientId, Date.now());
+      console.log(`📱 ${clientId}: Open/Share saw connected without browser — restoring session`);
+      createWhatsAppClient(clientId, { restoring: true }).catch((err) => {
+        console.error(`Connected restore failed for ${clientId}:`, err);
+      });
+    }
+    return { ok: true, connected: true, restoring: true };
   }
+
   if (isClientStarting(clientId)) {
+    markQrPageViewed(clientId);
     return { ok: true, active: true };
   }
+
+  markQrPageViewed(clientId);
 
   const lastStart = lastQrStartAt.get(clientId) || 0;
   if (Date.now() - lastStart < QR_RESTART_COOLDOWN_MS) {
@@ -333,6 +355,16 @@ const requestQrForClient = async (clientId) => {
 const releaseQrPendingClient = async (clientId, reason) => {
   const meta = qrMeta.get(clientId);
   if (meta?.releasing) return;
+
+  // Never tear down a live connected WhatsApp session (Open/Share refresh used to do this).
+  try {
+    const db = await WhatsAppClientModel.findOne({ clientId });
+    if (db?.status === 'connected' && activeClients.has(clientId)) {
+      clearQrMeta(clientId);
+      return;
+    }
+  } catch (_) {}
+
   if (isQrViewerActive(meta)) {
     if (meta.pendingTimer) clearTimeout(meta.pendingTimer);
     meta.pendingTimer = null;
@@ -597,6 +629,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     readyHandled = true;
     settleInit();
     clearQrMeta(clientId);
+    lastQrStartAt.delete(clientId);
     finishInitializing(clientId);
     const phone = wClient.info?.wid?.user || '';
     console.log(`✅ Ready: ${clientId} (${phone})`);

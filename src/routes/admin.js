@@ -1164,9 +1164,11 @@ router.get('/clients/:id/qr-share-link', async (req, res) => {
         error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
       });
     }
-    requestQrForClient(client.clientId).catch((err) => {
-      console.error(`QR share start failed for ${client.clientId}:`, err);
-    });
+    if (client.status !== 'connected') {
+      requestQrForClient(client.clientId).catch((err) => {
+        console.error(`QR share start failed for ${client.clientId}:`, err);
+      });
+    }
     res.json({
       ...qrShare,
       status: client.status,

@@ -121,19 +121,22 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     const hasQr   = qrCode.startsWith('data:image/png;base64,');
     const alreadyConnected = Boolean(qrRequest.connected || client.status === 'connected');
     const generating = !hasQr && !alreadyConnected && (qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready');
-    const qrHtml  = hasQr
-      ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
-      : alreadyConnected
-        ? '<p style="font:500 16px system-ui;color:#065f46;">This WhatsApp number is already connected.</p>'
+    const qrHtml  = alreadyConnected
+      ? '<p style="font:500 16px system-ui;color:#065f46;">Connected. You can close this page.</p>'
+      : hasQr
+        ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
         : generating
           ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open.</p>'
           : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
-    const hint = hasQr
-      ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
-      : alreadyConnected
-        ? ''
+    const hint = alreadyConnected
+      ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">WhatsApp is linked. Auto-refresh is stopped.</p>'
+      : hasQr
+        ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
         : '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically.</p>';
-    const refreshSec = alreadyConnected && !hasQr ? 20 : (hasQr ? 8 : 4);
+    // After connect: no meta-refresh (that was restarting Chromium). While waiting: poll.
+    const refreshMeta = alreadyConnected
+      ? ''
+      : `<meta http-equiv="refresh" content="${hasQr ? 8 : 4}">`;
 
     return res.status(200).send(`<!doctype html>
 <html>
@@ -141,11 +144,11 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WhatsApp QR</title>
-    <meta http-equiv="refresh" content="${refreshSec}">
+    ${refreshMeta}
   </head>
   <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#f3f4f6;">
     <main style="text-align:center;padding:24px;">
-      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">Scan WhatsApp QR</h1>
+      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">${alreadyConnected ? 'WhatsApp connected' : 'Scan WhatsApp QR'}</h1>
       ${qrHtml}
       ${hint}
     </main>
@@ -166,7 +169,10 @@ app.get('/public/qr/:clientId.png', async (req, res) => {
     const existing = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
     if (!existing) return res.status(404).send('Client not found');
 
-    await requestQrForClient(req.params.clientId);
+    const qrRequest = await requestQrForClient(req.params.clientId);
+    if (qrRequest.connected) {
+      return res.status(410).send('Already connected');
+    }
     const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true }) || existing;
 
     const imageBuffer = getQrCodeBuffer(client.qrCode);
