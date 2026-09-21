@@ -358,6 +358,7 @@ const getQrAutoRestartBlockMs = (clientId) => {
 const clearQrMeta = (clientId) => {
   const meta = qrMeta.get(clientId);
   if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
+  if (meta?.readyWatchTimer) clearInterval(meta.readyWatchTimer);
   qrMeta.delete(clientId);
 };
 
@@ -370,6 +371,8 @@ const getQrMeta = (clientId) => {
       pendingTimer: null,
       handling: false,
       releasing: false,
+      authenticated: false,
+      readyWatchTimer: null,
     });
   }
   return qrMeta.get(clientId);
@@ -501,6 +504,16 @@ const requestQrForClient = async (clientId) => {
 const releaseQrPendingClient = async (clientId, reason) => {
   const meta = qrMeta.get(clientId);
   if (meta?.releasing) return;
+
+  // Scan already succeeded — never kill Chromium while waiting for ready.
+  if (meta?.authenticated) {
+    console.log(`🔑 ${clientId}: skip QR abandon (${reason}) — already authenticated, waiting for ready`);
+    if (meta.pendingTimer) {
+      clearTimeout(meta.pendingTimer);
+      meta.pendingTimer = null;
+    }
+    return;
+  }
 
   // Never tear down a live connected WhatsApp session (Open/Share refresh used to do this).
   try {
@@ -660,7 +673,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     authStrategy: new LocalAuth({ clientId, dataPath: SESSIONS_DIR }),
     puppeteer: puppeteerConfig,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0,
+    takeoverTimeoutMs: 10000,
   });
 
   let initSettled      = false;
@@ -673,6 +686,63 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     initSettled = true;
     if (initTimeoutHandle) clearTimeout(initTimeoutHandle);
     dropSlot();
+  };
+
+  const markClientReady = async (source = 'ready') => {
+    if (readyHandled || instanceAborted) return;
+    if (activeClients.get(clientId) !== wClient) return;
+    readyHandled = true;
+    settleInit();
+    clearQrMeta(clientId);
+    lastQrStartAt.delete(clientId);
+    finishInitializing(clientId);
+    const phone = wClient.info?.wid?.user || '';
+    console.log(`✅ Ready: ${clientId} (${phone}) [${source}]`);
+    await disconnectDuplicatePhoneClients(clientId, phone);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'connected', qrCode: null, phone, lastConnected: new Date() }
+    );
+    emitToClient(clientId, 'ready', { clientId, phone });
+  };
+
+  const startReadyWatchdog = () => {
+    const meta = getQrMeta(clientId);
+    if (meta.readyWatchTimer) return;
+    let ticks = 0;
+    meta.readyWatchTimer = setInterval(async () => {
+      ticks += 1;
+      if (readyHandled || instanceAborted || activeClients.get(clientId) !== wClient) {
+        clearInterval(meta.readyWatchTimer);
+        meta.readyWatchTimer = null;
+        return;
+      }
+      try {
+        const phone = wClient.info?.wid?.user;
+        if (!phone) {
+          if (ticks >= 90) {
+            clearInterval(meta.readyWatchTimer);
+            meta.readyWatchTimer = null;
+            console.error(`⏰ ${clientId}: authenticated but ready never arrived (no wid)`);
+          }
+          return;
+        }
+        let state = null;
+        try { state = await wClient.getState(); } catch (_) {}
+        if (state === 'CONNECTED' || phone) {
+          clearInterval(meta.readyWatchTimer);
+          meta.readyWatchTimer = null;
+          await markClientReady(`watchdog:${state || 'wid'}`);
+        }
+      } catch (e) {
+        // ignore transient puppeteer errors while WhatsApp finishes loading
+      }
+      if (ticks >= 90) {
+        clearInterval(meta.readyWatchTimer);
+        meta.readyWatchTimer = null;
+        console.error(`⏰ ${clientId}: authenticated but ready never arrived`);
+      }
+    }, 2000);
   };
 
   const scheduleRetry = async ({ timedOut = false, err = null } = {}) => {
@@ -796,21 +866,26 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     }
   });
 
+  wClient.on('authenticated', async () => {
+    const meta = getQrMeta(clientId);
+    meta.authenticated = true;
+    if (meta.pendingTimer) {
+      clearTimeout(meta.pendingTimer);
+      meta.pendingTimer = null;
+    }
+    console.log(`🔑 Authenticated: ${clientId} — waiting for ready (keep Chromium alive)`);
+    try {
+      await WhatsAppClientModel.findOneAndUpdate(
+        { clientId },
+        { status: 'initializing', qrCode: null }
+      );
+    } catch (_) {}
+    emitToClient(clientId, 'authenticated', { clientId });
+    startReadyWatchdog();
+  });
+
   wClient.on('ready', async () => {
-    if (readyHandled) return;
-    readyHandled = true;
-    settleInit();
-    clearQrMeta(clientId);
-    lastQrStartAt.delete(clientId);
-    finishInitializing(clientId);
-    const phone = wClient.info?.wid?.user || '';
-    console.log(`✅ Ready: ${clientId} (${phone})`);
-    await disconnectDuplicatePhoneClients(clientId, phone);
-    await WhatsAppClientModel.findOneAndUpdate(
-      { clientId },
-      { status: 'connected', qrCode: null, phone, lastConnected: new Date() }
-    );
-    emitToClient(clientId, 'ready', { clientId, phone });
+    await markClientReady('ready-event');
   });
 
   wClient.on('auth_failure', async (msg) => {

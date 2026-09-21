@@ -122,8 +122,9 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     const alreadyConnected = Boolean(qrRequest.connected || (client.status === 'connected' && !qrRequest.started && !qrRequest.active));
     const paused = Boolean(qrRequest.paused);
     const bootWait = Boolean(qrRequest.boot);
-    const generating = !hasQr && !alreadyConnected && !paused && !bootWait && (
-      qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready'
+    const finishing = !hasQr && !alreadyConnected && !paused && !bootWait && client.status === 'initializing';
+    const generating = !hasQr && !alreadyConnected && !paused && !bootWait && !finishing && (
+      qrRequest.started || qrRequest.active || client.status === 'qr_ready'
     );
     const retrySec = Math.ceil((qrRequest.retryInMs || 0) / 1000);
     const statusLine = `status: ${client.status}`;
@@ -135,13 +136,17 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
           ? '<p style="font:500 16px system-ui;color:#374151;">Server is restoring other WhatsApp numbers. This page will retry shortly…</p>'
           : hasQr
             ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
-            : generating
-              ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open (can take 30–90s).</p>'
-              : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
+            : finishing
+              ? '<p style="font:500 16px system-ui;color:#065f46;">Scan received — finishing WhatsApp connection… keep this tab open.</p>'
+              : generating
+                ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open (can take 30–90s).</p>'
+                : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
     const hint = alreadyConnected
       ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">WhatsApp is linked. Auto-refresh is stopped.</p>'
       : paused
         ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Leaving Open/Share open without scanning was restarting Chromium in a loop and starving other numbers.</p>'
+      : finishing
+        ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Do not close this page until it says Connected. Phone may show “last active” until the server finishes.</p>'
       : hasQr
         ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
         : `<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically. (${statusLine})</p>`;
@@ -151,7 +156,9 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
         ? `<meta http-equiv="refresh" content="${Math.max(30, Math.min(120, retrySec || 60))}">`
         : bootWait
           ? '<meta http-equiv="refresh" content="10">'
-          : `<meta http-equiv="refresh" content="${hasQr ? 8 : 4}">`;
+          : finishing
+            ? '<meta http-equiv="refresh" content="3">'
+            : `<meta http-equiv="refresh" content="${hasQr ? 8 : 4}">`;
 
     return res.status(200).send(`<!doctype html>
 <html>
@@ -163,7 +170,7 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
   </head>
   <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#f3f4f6;">
     <main style="text-align:center;padding:24px;">
-      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">${alreadyConnected ? 'WhatsApp connected' : (paused ? 'QR paused' : 'Scan WhatsApp QR')}</h1>
+      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">${alreadyConnected ? 'WhatsApp connected' : (paused ? 'QR paused' : (finishing ? 'Connecting…' : 'Scan WhatsApp QR'))}</h1>
       ${qrHtml}
       ${hint}
     </main>
