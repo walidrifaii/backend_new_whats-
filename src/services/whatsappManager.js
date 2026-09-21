@@ -442,10 +442,8 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   if (initializingClients.has(clientId) || activeClients.has(clientId)) {
     const existing = activeClients.get(clientId);
     if (existing) {
-      console.log(`Client ${clientId} already active`);
       return existing;
     }
-    console.log(`⏳ ${clientId}: init already in progress — skipping duplicate start`);
     return null;
   }
 
@@ -972,15 +970,48 @@ const initWhatsAppManager = async () => {
     const stuckClients = [...inProgress, ...qrReady, ...authFailed].filter(
       (c) => !manifestIds.has(c.clientId)
     );
-    if (stuckClients.length) {
+
+    // After a QR/connect race, status can stay initializing/qr_ready even though the
+    // number was scanned. Recover those instead of skipping → forcing another QR.
+    const stuckRecoverable = [];
+    const stuckDrop = [];
+    for (const c of stuckClients) {
+      const hasPhone = Boolean(normalizePhone(c.phone));
+      const hasSession = sessionExistsOnDisk(c.clientId);
+      if (c.status !== 'auth_failure' && hasPhone && hasSession) {
+        stuckRecoverable.push(c);
+      } else {
+        stuckDrop.push(c);
+      }
+    }
+
+    if (stuckRecoverable.length) {
       console.log(
-        `⏭️  Skipping ${stuckClients.length} stuck client(s) on boot (initializing/qr_ready/auth_failure) — reconnect manually from dashboard`
+        `♻️  Recovering ${stuckRecoverable.length} stuck client(s) with phone + session on disk (status was initializing/qr_ready)`
       );
       await Promise.allSettled(
-        stuckClients.map((c) =>
+        stuckRecoverable.map((c) =>
           WhatsAppClientModel.findOneAndUpdate(
             { clientId: c.clientId },
-            { status: 'disconnected', qrCode: null }
+            { status: 'connected', qrCode: null }
+          )
+        )
+      );
+    }
+
+    if (stuckDrop.length) {
+      console.log(
+        `⏭️  Skipping ${stuckDrop.length} stuck client(s) on boot (no reusable session) — reconnect manually from dashboard`
+      );
+      await Promise.allSettled(
+        stuckDrop.map((c) =>
+          WhatsAppClientModel.findOneAndUpdate(
+            { clientId: c.clientId },
+            {
+              status: 'disconnected',
+              qrCode: null,
+              ...(c.status === 'auth_failure' ? { phone: '' } : {}),
+            }
           )
         )
       );
@@ -1005,6 +1036,7 @@ const initWhatsAppManager = async () => {
 
     const allConnected = [
       ...connected,
+      ...stuckRecoverable.map((c) => ({ ...c, status: 'connected' })),
       ...deployRecover.map((c) => ({ ...c, status: 'connected' })),
     ];
 
