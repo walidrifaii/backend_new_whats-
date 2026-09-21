@@ -1222,11 +1222,72 @@ const initWhatsAppManager = async () => {
   }
 };
 
+/**
+ * Stops every Chromium client, deletes all session folders, resets DB to disconnected.
+ * After this, every number needs a fresh QR scan.
+ */
+const clearAllWhatsAppSessions = async () => {
+  const activeIds = [...activeClients.keys()];
+  console.warn(`🗑️  Clearing ALL WhatsApp sessions (${activeIds.length} active browser(s))...`);
+
+  await Promise.allSettled(
+    activeIds.map((id) => destroyClient(id, { skipDisconnectEmail: true }))
+  );
+
+  for (const timer of scheduledRetryTimers.values()) clearTimeout(timer);
+  scheduledRetryTimers.clear();
+  initializingClients.clear();
+  clientInitChains.clear();
+  qrMeta.clear();
+  lastQrStartAt.clear();
+  qrBlockedUntil.clear();
+  chromiumInitWaiters.length = 0;
+  chromiumInitSlotsInUse = 0;
+  chromiumInitSlotOwners.clear();
+  clientsPreservingSession.clear();
+  clearRestoreManifest();
+
+  let removedDirs = 0;
+  if (fs.existsSync(SESSIONS_DIR)) {
+    for (const name of fs.readdirSync(SESSIONS_DIR)) {
+      if (name === '.' || name === '..') continue;
+      const full = path.join(SESSIONS_DIR, name);
+      try {
+        fs.rmSync(full, { recursive: true, force: true });
+        removedDirs += 1;
+        console.log(`🗑️  Removed ${full}`);
+      } catch (e) {
+        console.error(`Failed to remove ${full}:`, e.message);
+      }
+    }
+  }
+
+  const clients = await WhatsAppClientModel.find({ isActive: true });
+  await Promise.allSettled(
+    clients.map((c) =>
+      WhatsAppClientModel.findOneAndUpdate(
+        { clientId: c.clientId },
+        { status: 'disconnected', qrCode: null, phone: '' }
+      )
+    )
+  );
+
+  console.warn(
+    `✅ Cleared ${removedDirs} session path(s); ${clients.length} number(s) set to disconnected`
+  );
+  return {
+    stoppedBrowsers: activeIds.length,
+    removedPaths: removedDirs,
+    resetClients: clients.length,
+  };
+};
+
 module.exports = {
   createWhatsAppClient,
   getClient,
   destroyClient,
   destroyAllClients,
+  clearAllWhatsAppSessions,
   sendMessage,
   waitForClientReady,
   initWhatsAppManager,

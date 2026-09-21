@@ -12,7 +12,7 @@ const { query } = require('../db/mysql');
 const { CLIENT, OTP_NUMBER, APP } = require('../db/tables');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
-const { createWhatsAppClient, isClientConnected, destroyClient, requestQrForClient } = require('../services/whatsappManager');
+const { createWhatsAppClient, isClientConnected, destroyClient, requestQrForClient, clearAllWhatsAppSessions } = require('../services/whatsappManager');
 const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser, assignPlanToNumber } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { buildQrSharePayload } = require('../utils/qrShare');
@@ -153,6 +153,19 @@ const serializeNumber = async (client, assignedUsers = null) => {
 };
 
 router.use(authMiddleware, adminMiddleware);
+
+// POST /api/admin/sessions/clear-all — wipe every WhatsApp session (disk + DB)
+router.post('/sessions/clear-all', async (_req, res) => {
+  try {
+    const result = await clearAllWhatsAppSessions();
+    res.json({
+      message: 'All WhatsApp sessions removed. Open/Share or Connect each number and scan a new QR.',
+      ...result,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET /api/admin/numbers — WhatsApp number pool
 router.get('/numbers', async (_req, res) => {
