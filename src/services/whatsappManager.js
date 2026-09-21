@@ -21,7 +21,16 @@ const initializingClients = new Set();
 const clientInitChains = new Map();
 const scheduledRetryTimers = new Map();
 const lastQrStartAt = new Map();
+/** After QR abandon, Open/Share must not restart Chromium in a tight loop. */
+const qrBlockedUntil = new Map();
 const QR_RESTART_COOLDOWN_MS = 8000;
+
+/** Only one Chromium launch at a time — parallel inits OOM / timeout on small VPS. */
+let chromiumInitSlotsInUse = 0;
+const chromiumInitWaiters = [];
+const chromiumInitSlotOwners = new Set();
+/** Block Open/Share QR starts until boot restore finishes. */
+let bootRestoreDone = false;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
@@ -37,6 +46,8 @@ const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE
 const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 180000));
 const getQrMaxRefreshes       = () => Math.max(6, parseEnvInt('WA_QR_MAX_REFRESHES', 8));
 const getQrViewGraceMs        = () => Math.max(15000, parseEnvInt('WA_QR_VIEW_GRACE_MS', 45000));
+const getQrAbandonCooldownMs  = () => Math.max(60000, parseEnvInt('WA_QR_ABANDON_COOLDOWN_MS', 300000));
+const getMaxConcurrentInits   = () => Math.max(1, parseEnvInt('WA_MAX_CONCURRENT_INITS', 1));
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 const getBootRestoreDelayMs   = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 20000));
@@ -259,6 +270,52 @@ const finishInitializing = (clientId) => {
   cancelScheduledRetry(clientId);
 };
 
+const acquireChromiumInitSlot = (clientId) =>
+  new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (chromiumInitSlotsInUse < getMaxConcurrentInits()) {
+        chromiumInitSlotsInUse += 1;
+        chromiumInitSlotOwners.add(clientId);
+        resolve();
+        return true;
+      }
+      return false;
+    };
+    if (!tryAcquire()) {
+      console.log(
+        `⏳ ${clientId}: waiting for Chromium slot (${chromiumInitSlotsInUse}/${getMaxConcurrentInits()} in use)`
+      );
+      chromiumInitWaiters.push(tryAcquire);
+    }
+  });
+
+const releaseChromiumInitSlot = (clientId = null) => {
+  if (clientId) {
+    if (!chromiumInitSlotOwners.has(clientId)) return;
+    chromiumInitSlotOwners.delete(clientId);
+  }
+  chromiumInitSlotsInUse = Math.max(0, chromiumInitSlotsInUse - 1);
+  while (chromiumInitWaiters.length > 0 && chromiumInitSlotsInUse < getMaxConcurrentInits()) {
+    const next = chromiumInitWaiters.shift();
+    if (next && next()) break;
+  }
+};
+
+const blockQrAutoRestart = (clientId) => {
+  const until = Date.now() + getQrAbandonCooldownMs();
+  qrBlockedUntil.set(clientId, until);
+  return until;
+};
+
+const clearQrAutoRestartBlock = (clientId) => {
+  qrBlockedUntil.delete(clientId);
+};
+
+const getQrAutoRestartBlockMs = (clientId) => {
+  const until = qrBlockedUntil.get(clientId) || 0;
+  return Math.max(0, until - Date.now());
+};
+
 const clearQrMeta = (clientId) => {
   const meta = qrMeta.get(clientId);
   if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
@@ -315,6 +372,9 @@ const requestQrForClient = async (clientId) => {
     if (isClientStarting(clientId)) {
       return { ok: true, connected: true, active: true };
     }
+    if (!bootRestoreDone) {
+      return { ok: true, connected: true, boot: true };
+    }
     // DB says connected but browser died — silent restore, do not flip to initializing/QR.
     const lastStart = lastQrStartAt.get(clientId) || 0;
     if (Date.now() - lastStart >= QR_RESTART_COOLDOWN_MS) {
@@ -325,6 +385,20 @@ const requestQrForClient = async (clientId) => {
       });
     }
     return { ok: true, connected: true, restoring: true };
+  }
+
+  if (!bootRestoreDone) {
+    return { ok: true, boot: true, message: 'Server is restoring other WhatsApp sessions. Try again shortly.' };
+  }
+
+  const blockedMs = getQrAutoRestartBlockMs(clientId);
+  if (blockedMs > 0) {
+    return {
+      ok: true,
+      paused: true,
+      retryInMs: blockedMs,
+      message: 'QR timed out. Wait before Open/Share starts Chromium again (frees memory for other numbers).',
+    };
   }
 
   if (isClientStarting(clientId)) {
@@ -375,6 +449,10 @@ const releaseQrPendingClient = async (clientId, reason) => {
   if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
 
   console.warn(`⏹️  ${clientId}: QR abandoned (${reason}) — stopping Chromium to free memory`);
+  const blockedUntil = blockQrAutoRestart(clientId);
+  console.warn(
+    `⏸️  ${clientId}: Open/Share auto-restart blocked for ${Math.round((blockedUntil - Date.now()) / 1000)}s`
+  );
 
   const wClient = activeClients.get(clientId);
   activeClients.delete(clientId);
@@ -414,6 +492,9 @@ const startQrPendingTimer = (clientId) => {
  * @param {number}  [opts.attempt=1]            – internal retry counter
  */
 const createWhatsAppClient = async (clientId, opts = {}) => {
+  // Dashboard Connect / restore may start again after an Open/Share abandon pause.
+  clearQrAutoRestartBlock(clientId);
+
   const prior = clientInitChains.get(clientId);
   if (prior) {
     try { await prior; } catch (_) {}
@@ -475,6 +556,15 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     clearChromiumLocks(clientId);
   }
 
+  await acquireChromiumInitSlot(clientId);
+  let slotHeld = true;
+  const dropSlot = () => {
+    if (!slotHeld) return;
+    slotHeld = false;
+    releaseChromiumInitSlot(clientId);
+  };
+
+  try {
   const chromePath = getChromePath();
   const puppeteerConfig = {
     headless: true,
@@ -510,6 +600,7 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     if (initSettled) return;
     initSettled = true;
     if (initTimeoutHandle) clearTimeout(initTimeoutHandle);
+    dropSlot();
   };
 
   const scheduleRetry = async ({ timedOut = false, err = null } = {}) => {
@@ -541,7 +632,12 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
       const timer = setTimeout(() => {
         scheduledRetryTimers.delete(clientId);
         clearChromiumLocks(clientId);
-        createWhatsAppClient(clientId, { attempt: nextAttempt }).catch(e =>
+        createWhatsAppClient(clientId, {
+          attempt: nextAttempt,
+          restoring,
+          forceReauth,
+          sessionMissing,
+        }).catch(e =>
           console.error(`Retry failed for ${clientId}:`, e)
         );
       }, delay);
@@ -737,6 +833,12 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   });
 
   return wClient;
+  } catch (err) {
+    dropSlot();
+    finishInitializing(clientId);
+    activeClients.delete(clientId);
+    throw err;
+  }
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -756,6 +858,7 @@ const destroyClient = async (clientId, options = {}) => {
   clearQrMeta(clientId);
   finishInitializing(clientId);
   cancelScheduledRetry(clientId);
+  releaseChromiumInitSlot(clientId);
   const wClient = activeClients.get(clientId);
   if (wClient) {
     try { await wClient.destroy(); } catch (e) {
@@ -947,6 +1050,7 @@ const sendMessage = async (clientId, phone, message, opts = null) => {
  * so Chromium is not started for un-scanned or failed clients (saves RAM on boot).
  */
 const initWhatsAppManager = async () => {
+  bootRestoreDone = false;
   try {
     const bootDelay = getBootRestoreDelayMs();
     if (bootDelay > 0) {
@@ -1113,6 +1217,8 @@ const initWhatsAppManager = async () => {
     console.log('✅ WhatsApp manager ready.');
   } catch (err) {
     console.error('initWhatsAppManager error:', err);
+  } finally {
+    bootRestoreDone = true;
   }
 };
 

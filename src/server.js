@@ -120,23 +120,35 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     const qrCode  = client.qrCode || '';
     const hasQr   = qrCode.startsWith('data:image/png;base64,');
     const alreadyConnected = Boolean(qrRequest.connected || client.status === 'connected');
-    const generating = !hasQr && !alreadyConnected && (qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready');
+    const paused = Boolean(qrRequest.paused);
+    const bootWait = Boolean(qrRequest.boot);
+    const generating = !hasQr && !alreadyConnected && !paused && !bootWait && (qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready');
+    const retrySec = Math.ceil((qrRequest.retryInMs || 0) / 1000);
     const qrHtml  = alreadyConnected
       ? '<p style="font:500 16px system-ui;color:#065f46;">Connected. You can close this page.</p>'
-      : hasQr
-        ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
-        : generating
-          ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open.</p>'
-          : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
+      : paused
+        ? `<p style="font:500 16px system-ui;color:#92400e;">QR timed out to free memory. Wait ${retrySec || 60}s, then reload — or click Connect in the dashboard.</p>`
+        : bootWait
+          ? '<p style="font:500 16px system-ui;color:#374151;">Server is restoring other WhatsApp numbers. This page will retry shortly…</p>'
+          : hasQr
+            ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
+            : generating
+              ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open.</p>'
+              : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
     const hint = alreadyConnected
       ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">WhatsApp is linked. Auto-refresh is stopped.</p>'
-      : hasQr
-        ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
-        : '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically.</p>';
-    // After connect: no meta-refresh (that was restarting Chromium). While waiting: poll.
+      : paused
+        ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Leaving Open/Share open without scanning was restarting Chromium in a loop and starving other numbers.</p>'
+        : hasQr
+          ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
+          : '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically.</p>';
     const refreshMeta = alreadyConnected
       ? ''
-      : `<meta http-equiv="refresh" content="${hasQr ? 8 : 4}">`;
+      : paused
+        ? `<meta http-equiv="refresh" content="${Math.max(30, Math.min(120, retrySec || 60))}">`
+        : bootWait
+          ? '<meta http-equiv="refresh" content="10">'
+          : `<meta http-equiv="refresh" content="${hasQr ? 8 : 4}">`;
 
     return res.status(200).send(`<!doctype html>
 <html>
@@ -148,7 +160,7 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
   </head>
   <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#f3f4f6;">
     <main style="text-align:center;padding:24px;">
-      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">${alreadyConnected ? 'WhatsApp connected' : 'Scan WhatsApp QR'}</h1>
+      <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">${alreadyConnected ? 'WhatsApp connected' : (paused ? 'QR paused' : 'Scan WhatsApp QR')}</h1>
       ${qrHtml}
       ${hint}
     </main>
