@@ -362,8 +362,36 @@ const requestQrForClient = async (clientId) => {
   const db = await WhatsAppClientModel.findOne({ clientId, isActive: true });
   if (!db) return { ok: false, reason: 'not_found' };
 
-  // Already linked: stop QR timers and leave Chromium alone (share-page refresh used to
-  // re-arm the abandon timer and destroy the session → connected + reconnecting loop).
+  const hasLiveSession = sessionExistsOnDisk(clientId);
+
+  // DB says connected but session files were wiped → must show a fresh QR (not silent restore).
+  if (db.status === 'connected' && !hasLiveSession && !activeClients.has(clientId)) {
+    console.warn(`📱 ${clientId}: connected in DB but no session on disk — starting fresh QR`);
+    await WhatsAppClientModel.findOneAndUpdate(
+      { clientId },
+      { status: 'initializing', qrCode: null, phone: '' }
+    );
+    clearQrAutoRestartBlock(clientId);
+    if (!bootRestoreDone) {
+      return { ok: true, boot: true, message: 'Server is finishing boot. QR will start next.' };
+    }
+    if (isClientStarting(clientId)) {
+      markQrPageViewed(clientId);
+      return { ok: true, active: true };
+    }
+    markQrPageViewed(clientId);
+    const lastStart = lastQrStartAt.get(clientId) || 0;
+    if (Date.now() - lastStart < QR_RESTART_COOLDOWN_MS) {
+      return { ok: true, started: false };
+    }
+    lastQrStartAt.set(clientId, Date.now());
+    createWhatsAppClient(clientId, { sessionMissing: true }).catch((err) => {
+      console.error(`QR page init failed for ${clientId}:`, err);
+    });
+    return { ok: true, started: true };
+  }
+
+  // Already linked with a live browser or real session on disk.
   if (db.status === 'connected') {
     clearQrMeta(clientId);
     if (activeClients.has(clientId)) {
@@ -375,7 +403,6 @@ const requestQrForClient = async (clientId) => {
     if (!bootRestoreDone) {
       return { ok: true, connected: true, boot: true };
     }
-    // DB says connected but browser died — silent restore, do not flip to initializing/QR.
     const lastStart = lastQrStartAt.get(clientId) || 0;
     if (Date.now() - lastStart >= QR_RESTART_COOLDOWN_MS) {
       lastQrStartAt.set(clientId, Date.now());
@@ -669,12 +696,18 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     if (meta.releasing) return;
 
     if (restoring) {
+      // Session files were stale/missing — if Open/Share is open, show QR; else stop Chromium.
+      if (!isQrViewerActive(meta)) {
+        console.warn(
+          `⚠️  ${clientId}: saved session expired during restore — disconnect (scan from Open/Share)`
+        );
+        instanceAborted = true;
+        await releaseQrPendingClient(clientId, 'expired session during restore');
+        return;
+      }
       console.warn(
-        `⚠️  ${clientId}: saved session expired during restore — disconnect (scan from Open/Share)`
+        `⚠️  ${clientId}: session expired during restore — showing QR because Open/Share is open`
       );
-      instanceAborted = true;
-      await releaseQrPendingClient(clientId, 'expired session during restore');
-      return;
     }
 
     startQrPendingTimer(clientId);

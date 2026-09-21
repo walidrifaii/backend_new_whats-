@@ -119,11 +119,14 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true }) || existing;
     const qrCode  = client.qrCode || '';
     const hasQr   = qrCode.startsWith('data:image/png;base64,');
-    const alreadyConnected = Boolean(qrRequest.connected || client.status === 'connected');
+    const alreadyConnected = Boolean(qrRequest.connected || (client.status === 'connected' && !qrRequest.started && !qrRequest.active));
     const paused = Boolean(qrRequest.paused);
     const bootWait = Boolean(qrRequest.boot);
-    const generating = !hasQr && !alreadyConnected && !paused && !bootWait && (qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready');
+    const generating = !hasQr && !alreadyConnected && !paused && !bootWait && (
+      qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready'
+    );
     const retrySec = Math.ceil((qrRequest.retryInMs || 0) / 1000);
+    const statusLine = `status: ${client.status}`;
     const qrHtml  = alreadyConnected
       ? '<p style="font:500 16px system-ui;color:#065f46;">Connected. You can close this page.</p>'
       : paused
@@ -133,15 +136,15 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
           : hasQr
             ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
             : generating
-              ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open.</p>'
+              ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open (can take 30–90s).</p>'
               : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
     const hint = alreadyConnected
       ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">WhatsApp is linked. Auto-refresh is stopped.</p>'
       : paused
         ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Leaving Open/Share open without scanning was restarting Chromium in a loop and starving other numbers.</p>'
-        : hasQr
-          ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
-          : '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically.</p>';
+      : hasQr
+        ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
+        : `<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically. (${statusLine})</p>`;
     const refreshMeta = alreadyConnected
       ? ''
       : paused
