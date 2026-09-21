@@ -3,7 +3,7 @@ const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const WhatsAppClientModel = require('../models/WhatsAppClient');
-const { createWhatsAppClient, destroyClient, isClientConnected } = require('../services/whatsappManager');
+const { createWhatsAppClient, destroyClient, isClientConnected, requestQrForClient } = require('../services/whatsappManager');
 const authMiddleware = require('../middleware/auth');
 const { buildQrSharePayload } = require('../utils/qrShare');
 const { getOwnerUserId, isServiceAccount } = require('../utils/accountScope');
@@ -257,6 +257,9 @@ router.get('/:id/qr-share-link', authMiddleware, async (req, res) => {
         error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
       });
     }
+    requestQrForClient(client.clientId).catch((err) => {
+      console.error(`QR share start failed for ${client.clientId}:`, err);
+    });
     res.json(qrShare);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -20,6 +20,8 @@ const qrMeta = new Map();
 const initializingClients = new Set();
 const clientInitChains = new Map();
 const scheduledRetryTimers = new Map();
+const lastQrStartAt = new Map();
+const QR_RESTART_COOLDOWN_MS = 8000;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const parseEnvInt = (key, fallback) => {
@@ -31,9 +33,10 @@ const getInitMaxRetries       = () => Math.max(0, parseEnvInt('WA_INIT_MAX_RETRI
 const getRetryBaseDelayMs     = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_BASE_DELAY_MS', 3000));
 const getRetryMaxDelayMs      = () => Math.max(1000, parseEnvInt('WA_INIT_RETRY_MAX_DELAY_MS',  15000));
 const getQrThrottleMs         = () => Math.max(5000, parseEnvInt('WA_QR_THROTTLE_MS', 20000));
-// Backup safety net — primary stop is WA_QR_MAX_REFRESHES (default: first QR + one retry).
+// Backup safety net — primary stop is WA_QR_MAX_REFRESHES.
 const getQrPendingTimeoutMs   = () => Math.max(60000, parseEnvInt('WA_QR_PENDING_TIMEOUT_MS', 180000));
-const getQrMaxRefreshes       = () => Math.max(1, parseEnvInt('WA_QR_MAX_REFRESHES', 2));
+const getQrMaxRefreshes       = () => Math.max(6, parseEnvInt('WA_QR_MAX_REFRESHES', 8));
+const getQrViewGraceMs        = () => Math.max(15000, parseEnvInt('WA_QR_VIEW_GRACE_MS', 45000));
 const getRestoreBatchSize     = () => Math.max(1, parseEnvInt('WA_RESTORE_BATCH_SIZE', 1));
 const getRestoreBatchDelayMs  = () => Math.max(1000, parseEnvInt('WA_RESTORE_BATCH_DELAY_MS', 5000));
 const getBootRestoreDelayMs   = () => Math.max(0, parseEnvInt('WA_BOOT_RESTORE_DELAY_MS', 20000));
@@ -252,12 +255,60 @@ const getQrMeta = (clientId) => {
     qrMeta.set(clientId, {
       refreshCount: 0,
       lastHandledAt: 0,
+      lastViewedAt: 0,
       pendingTimer: null,
       handling: false,
       releasing: false,
     });
   }
   return qrMeta.get(clientId);
+};
+
+const isQrViewerActive = (meta) =>
+  Boolean(meta?.lastViewedAt && Date.now() - meta.lastViewedAt < getQrViewGraceMs());
+
+const isClientStarting = (clientId) =>
+  initializingClients.has(clientId) || clientInitChains.has(clientId) || activeClients.has(clientId);
+
+/** Keep Chromium alive while Open/Share is being viewed. */
+const markQrPageViewed = (clientId) => {
+  const meta = getQrMeta(clientId);
+  meta.lastViewedAt = Date.now();
+  if (meta.pendingTimer) {
+    clearTimeout(meta.pendingTimer);
+    meta.pendingTimer = null;
+  }
+  startQrPendingTimer(clientId);
+};
+
+/**
+ * Called from the public Open/Share QR page.
+ * Restarts Chromium when a previous QR timed out so the page is not stuck on "waiting".
+ */
+const requestQrForClient = async (clientId) => {
+  markQrPageViewed(clientId);
+
+  const db = await WhatsAppClientModel.findOne({ clientId, isActive: true });
+  if (!db) return { ok: false, reason: 'not_found' };
+  if (db.status === 'connected' && activeClients.has(clientId)) {
+    return { ok: true, connected: true };
+  }
+  if (isClientStarting(clientId)) {
+    return { ok: true, active: true };
+  }
+
+  const lastStart = lastQrStartAt.get(clientId) || 0;
+  if (Date.now() - lastStart < QR_RESTART_COOLDOWN_MS) {
+    return { ok: true, started: false };
+  }
+  lastQrStartAt.set(clientId, Date.now());
+
+  console.log(`📱 ${clientId}: Open/Share requested QR — starting Chromium`);
+  await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'initializing' });
+  createWhatsAppClient(clientId).catch((err) => {
+    console.error(`QR page init failed for ${clientId}:`, err);
+  });
+  return { ok: true, started: true };
 };
 
 /**
@@ -267,6 +318,12 @@ const getQrMeta = (clientId) => {
 const releaseQrPendingClient = async (clientId, reason) => {
   const meta = qrMeta.get(clientId);
   if (meta?.releasing) return;
+  if (isQrViewerActive(meta)) {
+    if (meta.pendingTimer) clearTimeout(meta.pendingTimer);
+    meta.pendingTimer = null;
+    startQrPendingTimer(clientId);
+    return;
+  }
   if (meta) meta.releasing = true;
   if (meta?.pendingTimer) clearTimeout(meta.pendingTimer);
 
@@ -346,6 +403,15 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
   }
 
   initializingClients.add(clientId);
+
+  if (attempt === 1) {
+    const lastViewedAt = qrMeta.get(clientId)?.lastViewedAt || 0;
+    clearQrMeta(clientId);
+    if (lastViewedAt) {
+      getQrMeta(clientId).lastViewedAt = lastViewedAt;
+      startQrPendingTimer(clientId);
+    }
+  }
 
   console.log(`🔧 Init ${clientId} (attempt ${attempt}/${maxRetries + 1})`);
 
@@ -455,10 +521,19 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
     settleInit();
 
     const meta = getQrMeta(clientId);
-    meta.refreshCount += 1;
+    if (meta.releasing) return;
+
     startQrPendingTimer(clientId);
 
-    if (meta.refreshCount > getQrMaxRefreshes()) {
+    const now = Date.now();
+    const viewerActive = isQrViewerActive(meta);
+    if (meta.handling || (meta.lastHandledAt && now - meta.lastHandledAt < getQrThrottleMs())) {
+      return;
+    }
+
+    // Count only QRs that were actually shown. Rapid WhatsApp events must not kill Chromium
+    // before Open/Share can display the first code.
+    if (!viewerActive && meta.refreshCount >= getQrMaxRefreshes()) {
       console.warn(
         `⏹️  ${clientId}: QR limit reached (${meta.refreshCount}/${getQrMaxRefreshes()}) — stopping Chromium`
       );
@@ -466,23 +541,21 @@ const createWhatsAppClientInner = async (clientId, opts = {}) => {
       return;
     }
 
-    if (meta.refreshCount === 1 && sessionExistsOnDisk(clientId)) {
-      console.warn(
-        `⚠️  ${clientId}: QR despite saved session — auth may be expired or another client uses this number`
-      );
-    }
-
-    const now = Date.now();
-    if (meta.handling || (meta.refreshCount > 1 && now - meta.lastHandledAt < getQrThrottleMs())) {
-      return;
-    }
-
     meta.handling = true;
     try {
-      console.log(`📱 QR for ${clientId} (#${meta.refreshCount})`);
+      const nextCount = meta.refreshCount + 1;
+      if (nextCount === 1 && sessionExistsOnDisk(clientId)) {
+        console.warn(
+          `⚠️  ${clientId}: QR despite saved session — auth may be expired or another client uses this number`
+        );
+      }
+      console.log(`📱 QR for ${clientId} (#${nextCount})`);
       const qrDataUrl = await qrcode.toDataURL(qr);
+      if (meta.releasing || activeClients.get(clientId) !== wClient) return;
+
       await WhatsAppClientModel.findOneAndUpdate({ clientId }, { status: 'qr_ready', qrCode: qrDataUrl });
       emitToClient(clientId, 'qr', { clientId, qr: qrDataUrl });
+      meta.refreshCount = nextCount;
       meta.lastHandledAt = Date.now();
     } catch (e) {
       console.error(`QR error for ${clientId}:`, e);
@@ -959,5 +1032,6 @@ module.exports = {
   waitForClientReady,
   initWhatsAppManager,
   isClientConnected,
+  requestQrForClient,
   activeClients,
 };

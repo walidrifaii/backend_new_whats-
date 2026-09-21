@@ -12,7 +12,7 @@ const { query } = require('../db/mysql');
 const { CLIENT, OTP_NUMBER, APP } = require('../db/tables');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
-const { createWhatsAppClient, isClientConnected, destroyClient } = require('../services/whatsappManager');
+const { createWhatsAppClient, isClientConnected, destroyClient, requestQrForClient } = require('../services/whatsappManager');
 const { getOwnerSubscription, getAccountSubscription, serializeSubscription, assignPlanToUser, assignPlanToNumber } = require('../utils/subscription');
 const { normalizeMessageSource } = require('../utils/messageSource');
 const { buildQrSharePayload } = require('../utils/qrShare');
@@ -1164,6 +1164,9 @@ router.get('/clients/:id/qr-share-link', async (req, res) => {
         error: 'QR sharing is not configured. Set QR_SHARE_TOKEN in environment.'
       });
     }
+    requestQrForClient(client.clientId).catch((err) => {
+      console.error(`QR share start failed for ${client.clientId}:`, err);
+    });
     res.json({
       ...qrShare,
       status: client.status,

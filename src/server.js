@@ -22,7 +22,7 @@ const WhatsAppClientModel = require('./models/WhatsAppClient');
 const MessageLog          = require('./models/MessageLog');
 const { isClientQrTokenValid } = require('./utils/qrShare');
 
-const { initWhatsAppManager, destroyAllClients } = require('./services/whatsappManager');
+const { initWhatsAppManager, destroyAllClients, requestQrForClient } = require('./services/whatsappManager');
 const { setSocketIO } = require('./utils/socket');
 
 process.on('unhandledRejection', (reason) => {
@@ -112,14 +112,28 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     if (!isClientQrTokenValid(req.params.clientId, token)) {
       return res.status(403).send('Invalid or missing QR share token');
     }
-    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
-    if (!client) return res.status(404).send('Client not found');
+    const existing = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
+    if (!existing) return res.status(404).send('Client not found');
 
+    const qrRequest = await requestQrForClient(req.params.clientId);
+    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true }) || existing;
     const qrCode  = client.qrCode || '';
     const hasQr   = qrCode.startsWith('data:image/png;base64,');
+    const alreadyConnected = Boolean(qrRequest.connected || client.status === 'connected');
+    const generating = !hasQr && !alreadyConnected && (qrRequest.started || qrRequest.active || client.status === 'initializing' || client.status === 'qr_ready');
     const qrHtml  = hasQr
       ? `<img src="${qrCode}" alt="WhatsApp QR" style="width:320px;height:320px;border:1px solid #e5e7eb;border-radius:12px;padding:8px;background:#fff;" />`
-      : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
+      : alreadyConnected
+        ? '<p style="font:500 16px system-ui;color:#065f46;">This WhatsApp number is already connected.</p>'
+        : generating
+          ? '<p style="font:500 16px system-ui;color:#374151;">Generating a fresh QR code… keep this page open.</p>'
+          : '<p style="font:500 16px system-ui;color:#374151;">Waiting for a fresh QR code...</p>';
+    const hint = hasQr
+      ? '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">Open WhatsApp → Linked devices → Link a device, then scan this code.</p>'
+      : alreadyConnected
+        ? ''
+        : '<p style="font:400 13px system-ui;color:#6b7280;margin:16px 0 0;">This page refreshes automatically.</p>';
+    const refreshSec = alreadyConnected && !hasQr ? 20 : (hasQr ? 8 : 4);
 
     return res.status(200).send(`<!doctype html>
 <html>
@@ -127,12 +141,13 @@ app.get('/public/qr/:clientId([^\\.]+)', async (req, res) => {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WhatsApp QR</title>
-    <meta http-equiv="refresh" content="8">
+    <meta http-equiv="refresh" content="${refreshSec}">
   </head>
   <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#f3f4f6;">
     <main style="text-align:center;padding:24px;">
       <h1 style="font:600 20px system-ui;margin:0 0 12px;color:#111827;">Scan WhatsApp QR</h1>
       ${qrHtml}
+      ${hint}
     </main>
   </body>
 </html>`);
@@ -148,8 +163,11 @@ app.get('/public/qr/:clientId.png', async (req, res) => {
     if (!isClientQrTokenValid(req.params.clientId, token)) {
       return res.status(403).send('Invalid or missing QR share token');
     }
-    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
-    if (!client) return res.status(404).send('Client not found');
+    const existing = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true });
+    if (!existing) return res.status(404).send('Client not found');
+
+    await requestQrForClient(req.params.clientId);
+    const client = await WhatsAppClientModel.findOne({ clientId: req.params.clientId, isActive: true }) || existing;
 
     const imageBuffer = getQrCodeBuffer(client.qrCode);
     if (!imageBuffer) return res.status(404).send('QR not ready');
